@@ -4,7 +4,17 @@ set -euo pipefail
 [[ -f /opt/unm/unm.py && -f /opt/unm/deploy/unm.service ]] || { echo 'Clone this repository to /opt/unm first'; exit 1; }
 command -v python3 >/dev/null
 command -v firewall-cmd >/dev/null || { echo 'firewalld is missing. Stop and inspect the existing firewall before installing it.'; exit 1; }
-firewall-cmd --state
+if ! firewall-cmd --state; then
+  install_mode=$(python3 - <<'PY'
+import json
+from pathlib import Path
+p=Path('/etc/unm/config.json')
+print(json.loads(p.read_text())['mode'] if p.exists() else 'preview')
+PY
+)
+  [[ "$install_mode" == preview ]] || { echo 'Live mode requires a running firewalld. Review existing rules before enabling it.'; exit 1; }
+  echo 'firewalld is inactive: installing preview only. No firewall will be enabled or changed.'
+fi
 id unm >/dev/null 2>&1 || useradd --system --home-dir /var/lib/unm --shell /usr/sbin/nologin unm
 install -d -m 750 -o root -g unm /etc/unm
 install -d -m 700 -o unm -g unm /var/lib/unm

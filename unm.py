@@ -132,7 +132,9 @@ class App(Networking):
         ipaddress.ip_network(c['wireguard_subnet'])
         if c['secure_cookie'] and not c['origin'].startswith('https://'):
             raise ValueError('Secure cookies require an HTTPS origin')
-        if not c['secure_cookie'] and c['origin'] not in ('http://localhost:8787', 'http://127.0.0.1:8787'):
+        origin = urlsplit(c['origin'])
+        if not c['secure_cookie'] and (origin.scheme != 'http' or origin.hostname not in ('localhost', '127.0.0.1')
+                                       or origin.username or origin.password or origin.path or origin.query or origin.fragment):
             raise ValueError('Public access requires HTTPS and secure_cookie=true')
         data = Path(c['data_dir'])
         data.mkdir(parents=True, exist_ok=True)
