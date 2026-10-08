@@ -29,7 +29,7 @@ from traffic import Traffic
 from services import Services
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 LOCK = threading.RLock()
 LOG = logging.getLogger('unm')
 

@@ -121,7 +121,33 @@ refresh().catch(()=>{});
 function peerForHost(h){return (state.wireguard.peers||[]).find(p=>(h.publicKey&&p.publicKey===h.publicKey)||(p.allowedIPs||[]).includes(h.address+'/32'));}
 function bytes(n){if(n<1024)return n+' B';const i=Math.min(4,Math.floor(Math.log(n)/Math.log(1024)));return (n/1024**i).toFixed(2)+' '+['B','KiB','MiB','GiB','TiB'][i];}
 function rate(n){return (n*8/1000000).toFixed(3)+' Mbit/s';}
-async function renderTraffic(){const t=await request('/api/traffic?days='+$('traffic-period').value);$('traffic-note').textContent=t.message;$('traffic-stats').innerHTML=[['Received',bytes(t.rx)],['Sent',bytes(t.tx)],['Receive rate',rate(t.rxRate)],['Send rate',rate(t.txRate)]].map(([label,value])=>'<div class="stat"><b>'+value+'</b><span>'+label+'</span></div>').join('');$('traffic-peers').innerHTML=t.peers.map(p=>{const host=state.hosts.find(h=>peerForHost(h)?.publicKey===p.peer);return '<article class="card"><div><h3>'+esc(host?.id||'Unregistered peer '+p.peer.slice(0,8))+'</h3><p>Received '+bytes(p.rx)+' · Sent '+bytes(p.tx)+'</p><p>'+rate(p.rxRate)+' in · '+rate(p.txRate)+' out</p></div></article>';}).join('')||empty('Waiting for the first successful traffic sample.');$('traffic-daily').innerHTML='<table><thead><tr><th>Day</th><th>Received</th><th>Sent</th></tr></thead><tbody>'+t.daily.map(d=>'<tr><td>'+esc(d.day)+'</td><td>'+bytes(d.rx)+'</td><td>'+bytes(d.tx)+'</td></tr>').join('')+'</tbody></table>';}
+function trafficChart(daily) {
+  if (!daily.length) return empty('Traffic history will appear after the first successful sample.');
+  const maximum=Math.max(1,...daily.map(d=>d.rx+d.tx));
+  const step=640/daily.length;
+  const bars=daily.map((d,i)=>{
+    const rx=150*d.rx/maximum,tx=150*d.tx/maximum,x=52+i*step,width=Math.max(2,step*.65);
+    const label=esc(d.day+': received '+bytes(d.rx)+', sent '+bytes(d.tx));
+    const tick=(i===0||i===daily.length-1||i%Math.max(1,Math.ceil(daily.length/6))===0)?'<text x="'+(x+width/2)+'" y="198" text-anchor="middle">'+esc(d.day.slice(5))+'</text>':'';
+    return '<g tabindex="0" role="img" aria-label="'+label+'"><title>'+label+'</title><rect class="rx-bar" x="'+x+'" y="'+(174-rx)+'" width="'+width+'" height="'+rx+'"/><rect class="tx-bar" x="'+x+'" y="'+(174-rx-tx)+'" width="'+width+'" height="'+tx+'"/><rect class="chart-hit" x="'+x+'" y="24" width="'+width+'" height="150"/></g>'+tick;
+  }).join('');
+  const grid=[0,.5,1].map(f=>'<line x1="48" x2="704" y1="'+(174-150*f)+'" y2="'+(174-150*f)+'"/><text x="44" y="'+(178-150*f)+'" text-anchor="end">'+bytes(maximum*f)+'</text>').join('');
+  return '<svg class="traffic-chart" viewBox="0 0 720 216" role="group" aria-label="Daily received and sent WireGuard traffic">'+grid+bars+'</svg>';
+}
+async function renderTraffic(){
+  const t=await request('/api/traffic?days='+$('traffic-period').value);
+  $('traffic-note').textContent=t.message;
+  $('traffic-stats').innerHTML=[['↓ Received',bytes(t.rx)],['↑ Sent',bytes(t.tx)],['↓ Receive rate',rate(t.rxRate)],['↑ Send rate',rate(t.txRate)]].map(([label,value])=>'<div class="stat"><b>'+value+'</b><span>'+label+'</span></div>').join('');
+  $('traffic-chart').innerHTML=trafficChart(t.daily);
+  const maximum=Math.max(1,...t.peers.map(p=>p.rx+p.tx));
+  $('traffic-peers').innerHTML=t.peers.map(p=>{
+    const host=state.hosts.find(h=>peerForHost(h)?.publicKey===p.peer);
+    const peer=host&&peerForHost(host);
+    const connected=peer&&Date.now()/1000-peer.lastHandshake<180&&peer.lastHandshake>0;
+    return '<article class="card tunnel-usage"><div><h3><span class="status-dot '+(connected?'connected':peer?'disconnected':'')+'" aria-label="'+(connected?'Recent handshake':peer?'No recent handshake':'Status unavailable')+'"></span>'+esc(host?.id||'Unregistered peer '+p.peer.slice(0,8))+'</h3><p>Received '+bytes(p.rx)+' · Sent '+bytes(p.tx)+'</p><div class="usage-track" role="img" aria-label="'+esc('Received '+bytes(p.rx)+', sent '+bytes(p.tx))+'"><span class="rx-bar" style="width:'+100*p.rx/maximum+'%"></span><span class="tx-bar" style="width:'+100*p.tx/maximum+'%"></span></div><p>'+rate(p.rxRate)+' in · '+rate(p.txRate)+' out</p></div></article>';
+  }).join('')||empty('Waiting for the first successful traffic sample.');
+  $('traffic-daily').innerHTML='<table><thead><tr><th>Day</th><th>Received</th><th>Sent</th></tr></thead><tbody>'+t.daily.map(d=>'<tr><td>'+esc(d.day)+'</td><td>'+bytes(d.rx)+'</td><td>'+bytes(d.tx)+'</td></tr>').join('')+'</tbody></table>';
+}
 $('traffic-period').onchange=()=>attempt(renderTraffic);
 $('firewall-master').onclick=()=>attempt(async()=>{const enabled=!((state.firewall.running??state.firewall.enabled));if(!enabled&&state.mode==='live'&&!confirm('Stop all of firewalld? This removes firewall protection for every service on the VPS.'))return;await request('/api/firewall/service','POST',{enabled});await refresh();});
 setInterval(()=>{if(state && $('forward-form').hidden && $('host-form').hidden && $('firewall-form').hidden && $('host-config').hidden && $('website-form').hidden && $('dns-form').hidden && $('key-form').hidden)refresh().catch(()=>{});},60000);
