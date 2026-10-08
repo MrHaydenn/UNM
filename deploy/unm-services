@@ -60,7 +60,7 @@ def web_text(cfg, items):
             continue
         text+='\n'+', '.join(('https://' if r['ssl'] else 'http://')+n for n in r['domains'])+' {\n'
         if r['ssl']:
-            text+=' tls {\n  issuer acme {\n   ca '+ca+'\n   email '+email+'\n  }\n }\n'
+            text+=' tls {\n  issuer acme {\n   dir '+ca+'\n   email '+email+'\n  }\n }\n'
         text+=' reverse_proxy '+r['scheme']+'://'+r['address']+':'+str(r['port'])+'\n}\n'
     return text
 
