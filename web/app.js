@@ -22,6 +22,7 @@ function badge(enabled) { return '<span class="badge '+(enabled?'':'off')+'">'+(
 function empty(message) { return '<div class="empty">'+message+'</div>'; }
 async function refresh() {
   state = await request('/api/state'); csrf = state.csrf;
+  $('app-version').textContent='UNM '+state.version;
   $('login').hidden=true; $('dashboard').hidden=false; $('logout').hidden=false;
   $('mode').textContent=state.mode === 'preview' ? 'Preview · no network changes' : 'Live';
   $('subtitle').textContent='Tunnel network '+state.subnet+' · Managed public ports '+state.portMin+'–'+state.portMax;
@@ -52,7 +53,7 @@ async function refresh() {
 $('login-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{await request('/api/login','POST',Object.fromEntries(new FormData(e.target)));e.target.reset();await refresh();});};
 $('logout').onclick=()=>attempt(async()=>{await request('/api/logout','POST',{});clearConfiguration();clearKey();location.reload();});
 $('refresh').onclick=()=>attempt(refresh);
-document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{document.querySelectorAll('.tab').forEach(tab=>tab.hidden=tab.id!==button.dataset.tab);document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('selected',b===button));notice();});
+document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{document.querySelectorAll('.tab').forEach(tab=>tab.hidden=tab.id!==button.dataset.tab);document.querySelectorAll('[data-tab]').forEach(b=>(b.classList.toggle('selected',b===button),b.setAttribute('aria-pressed',String(b===button))));notice();});
 function edit(rule) {
   const f=$('forward-form'); f.reset(); f.hidden=false;
   f.elements.hostId.innerHTML=state.hosts.map(h=>'<option value="'+esc(h.id)+'">'+esc(h.id)+' · '+esc(h.address)+'</option>').join('');
@@ -165,4 +166,5 @@ async function updateStatus(){const status=await request('/api/update');$('updat
 $('check-update').onclick=()=>attempt(updateStatus);
 $('run-update').onclick=()=>attempt(async()=>{if(!confirm('Update UNM from the latest GitHub main push? A backup is created and the panel restarts.'))return;await request('/api/update','POST',{});$('run-update').disabled=true;$('update-status').textContent='Update started. Wait for UNM to restart, then reload and sign in again.';});
 $('provisioning-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{await request('/api/wireguard/provisioning','POST',Object.fromEntries(new FormData(e.target)));await refresh();notice('WireGuard peer provisioning enabled. Existing tunnels remain in place.');});};
-document.querySelector('[data-tab="settings"]').addEventListener('click',()=>{const f=$('provisioning-form');f.elements.endpoint.value=state.wireguard.available?state.wireguard.endpoint:state.services.publicIP?state.services.publicIP+':51820':'';attempt(updateStatus);});
+document.querySelector('[data-tab="hosts"]').addEventListener('click',()=>{const f=$('provisioning-form');f.elements.endpoint.value=state.wireguard.available?state.wireguard.endpoint:state.services.publicIP?state.services.publicIP+':51820':'';});
+document.querySelector('[data-tab="settings"]').addEventListener('click',()=>attempt(updateStatus));

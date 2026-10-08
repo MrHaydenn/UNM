@@ -29,6 +29,7 @@ from traffic import Traffic
 from services import Services
 
 ROOT = Path(__file__).resolve().parent
+VERSION = "0.1.0"
 LOCK = threading.RLock()
 LOG = logging.getLogger('unm')
 
@@ -446,7 +447,7 @@ class Handler(BaseHTTPRequestHandler):
             body = self.read_body()
             return self.send(200, app.wg_call({'action':'configure','endpoint':body.get('endpoint','')}))
         if path == '/api/state'  and self.command == 'GET':
-            return self.send(200, dict(user=actor, csrf=session['csrf'], hosts=app.hosts(), forwards=app.servers(),
+            return self.send(200, dict(user=actor, version=VERSION, csrf=session['csrf'], hosts=app.hosts(), forwards=app.servers(),
                                       firewallRules=app.firewall_rules(), wireguard=app.wg_status(),
                                       firewall=app.firewall_state(),traffic=app.traffic_summary(30),
                                       websites=app.proxy_hosts(),dnsRecords=app.dns_records(),services=app.services_status(),integrationKeys=app.integration_keys(),
