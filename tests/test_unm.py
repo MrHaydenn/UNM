@@ -196,6 +196,37 @@ class ControlTests(unittest.TestCase):
             with self.assertRaises(ValueError):self.app.save_proxy(dict(item,port=8090),'admin')
         self.assertEqual(self.app.proxy_hosts()[0]['port'],8080)
 
+    def test_dns_integration_scope_ownership_rename_revoke_and_rollback(self):
+        status=dict(zones=['minecraft.example.com'],dnsEnabled=True,dnsRunning=True,publicIP='203.0.113.9')
+        with patch.object(self.app,'services_status',return_value=status), patch.object(self.app,'apply_services') as apply:
+            token=self.app.create_dns_client('mmsm','minecraft.example.com')
+            other=self.app.create_dns_client('other','minecraft.example.com')
+            self.app.cfg['mode']='live'
+            body=dict(zone='minecraft.example.com',label='test',port=25565)
+            path='/api/integrations/servers/server1'
+            self.assertEqual(self.req('/api/state',bearer=token)[0],403)
+            self.assertEqual(self.req(path,'PUT',body,bearer='invalid')[0],403)
+            self.assertEqual(self.req(path,'PUT',dict(body,zone='elsewhere.example.com'),bearer=token)[0],400)
+            code,result=self.req(path,'PUT',body,bearer=token)
+            self.assertEqual(code,200);self.assertEqual(result['hostname'],'test.minecraft.example.com')
+            self.assertEqual(len(self.app.dns_records()),2)
+            apply.reset_mock()
+            self.assertEqual(self.req(path,'PUT',body,bearer=token)[0],200)
+            apply.assert_not_called()
+            self.assertEqual(self.req(path,'PUT',body,bearer=other)[0],400)
+            before=self.app.dns_records()
+            with patch.object(self.app,'apply_services',side_effect=ValueError('reload failed')):
+                self.assertEqual(self.req(path,'PUT',dict(body,label='renamed'),bearer=token)[0],400)
+            self.assertEqual(self.app.dns_records(),before)
+            self.assertEqual(self.req(path,'PUT',dict(body,label='renamed',port=25566),bearer=token)[0],200)
+            self.assertTrue(all('renamed' in r['name'] for r in self.app.dns_records()))
+            self.assertEqual(self.req(path,'DELETE',bearer=other)[0],200)
+            self.assertEqual(len(self.app.dns_records()),2)
+            self.assertEqual(self.req(path,'DELETE',bearer=token)[0],200)
+            self.assertEqual(self.app.dns_records(),[])
+            self.app.db.execute('DELETE FROM dns_clients WHERE id=?',('mmsm',));self.app.db.commit()
+            self.assertEqual(self.req(path,'PUT',body,bearer=token)[0],403)
+
     def test_traffic_deltas_reset_and_retained_baseline(self):
         now=time.time()
         def sample(rx, tx, boot='first'):

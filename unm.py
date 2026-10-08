@@ -1,4 +1,5 @@
 """UNM: dependency-free control panel and bounded TCP forwarding service."""
+from integrations import Integrations
 import argparse
 import asyncio
 import base64
@@ -143,7 +144,7 @@ class Proxy:
         asyncio.run_coroutine_threadsafe(self.reconcile(entries), self.loop).result(20)
 
 
-class App(Networking, Traffic, Services):
+class App(Networking, Traffic, Services, Integrations):
     def __init__(self, config):
         self.cfg = json.loads(Path(config).read_text())
         c = self.cfg
@@ -186,6 +187,7 @@ class App(Networking, Traffic, Services):
         self.db.commit()
         self.init_traffic()
         self.init_services()
+        self.init_integrations()
         self.sessions, self.attempts, self.otp_used = {}, {}, {}
         self.proxy = Proxy(c) if c['mode'] == 'live' else None
 
@@ -416,6 +418,12 @@ class Handler(BaseHTTPRequestHandler):
             app.audit(row['name'], 'login', '')
             app.db.commit()
             return self.send(200, {'ok': True}, cookie=self.cookie(token))
+        if path.startswith('/api/integrations/servers/'):
+            client=app.dns_client(self.headers.get('Authorization',''))
+            if self.command not in ('PUT','DELETE'):
+                return self.send(405,{'error':'Use PUT or DELETE'})
+            result=app.publish_server_dns(client,path[len('/api/integrations/servers/'):],self.read_body() if self.command=='PUT' else None)
+            return self.send(200,result)
         actor, scope, session = self.authenticate()
         if path == '/api/state' and self.command == 'GET':
             return self.send(200, dict(user=actor, csrf=session['csrf'], hosts=app.hosts(), forwards=app.servers(),
@@ -514,10 +522,20 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default='config.json')
-    parser.add_argument('command', choices=['serve', 'create-admin', 'enable-totp', 'check'], nargs='?', default='serve')
+    parser.add_argument('command', choices=['serve', 'create-admin', 'enable-totp', 'check', 'create-dns-client', 'revoke-dns-client'], nargs='?', default='serve')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     app = App(args.config)
+    if args.command == 'create-dns-client':
+        token=app.create_dns_client(input('Client name (e.g. mmsm): ').strip(),input('Delegated DNS zone: ').strip().lower())
+        print('Save this token in MMSM; it is shown only once:')
+        print(token)
+        return
+    if args.command == 'revoke-dns-client':
+        app.db.execute('DELETE FROM dns_clients WHERE id=?',(input('Client name: ').strip(),))
+        app.db.commit()
+        print('Token revoked. Published DNS records are retained.')
+        return
     if args.command == 'create-admin':
         name = valid_id(input('Admin username: ').strip())
         password = getpass.getpass('Password (at least 14 characters): ')

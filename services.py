@@ -62,6 +62,7 @@ class Services:
 
     def save_dns(self, body, actor):
         rid=valid_id(body.get('id') or 'dns-'+secrets.token_hex(8))
+        self.assert_dns_unmanaged(rid)
         zones=self.services_status()['zones']
         item=record(body,zones)
         item['id']=rid
@@ -80,6 +81,7 @@ class Services:
             self.db.rollback();self.apply_services(kind,old);raise
 
     def delete_service_item(self, kind, rid, actor):
+        if kind=='dns': self.assert_dns_unmanaged(rid)
         table='proxy_hosts' if kind=='web' else 'dns_records'
         old=self.proxy_hosts() if kind=='web' else self.dns_records()
         self.apply_services(kind,[r for r in old if r['id']!=rid])
