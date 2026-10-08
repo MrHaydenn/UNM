@@ -1,0 +1,518 @@
+"""UNM: dependency-free control panel and bounded TCP forwarding service."""
+import argparse
+import asyncio
+import base64
+import getpass
+import hashlib
+import hmac
+import ipaddress
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import secrets
+import sqlite3
+import struct
+import subprocess
+import threading
+import time
+from http.cookies import SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit, urlencode
+from urllib.request import Request, urlopen
+
+ROOT = Path(__file__).resolve().parent
+LOCK = threading.RLock()
+LOG = logging.getLogger('unm')
+
+
+def digest(value):
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def password_hash(password, salt=None):
+    salt = salt or secrets.token_hex(16)
+    return salt + ':' + hashlib.pbkdf2_hmac('sha256', password.encode(), bytes.fromhex(salt), 600000).hex()
+
+
+def valid_id(value):
+    if not isinstance(value, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,47}', value):
+        raise ValueError('Use 1–48 lowercase letters, numbers or hyphens for the ID.')
+    return value
+
+
+def totp(secret, timestamp=None):
+    counter = int((time.time() if timestamp is None else timestamp) // 30)
+    raw = hmac.new(base64.b32decode(secret), struct.pack('>Q', counter), hashlib.sha1).digest()
+    offset = raw[-1] & 15
+    return str((struct.unpack('>I', raw[offset:offset + 4])[0] & 0x7fffffff) % 1000000).zfill(6)
+
+
+class Proxy:
+    def __init__(self, cfg):
+        self.cfg, self.listeners, self.active = cfg, {}, 0
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.thread.start()
+
+    async def connect(self, reader, writer, target):
+        if self.active >= self.cfg['max_connections']:
+            writer.close()
+            return
+        self.active += 1
+        upstream = None
+        try:
+            remote, upstream = await asyncio.wait_for(asyncio.open_connection(*target), 10)
+
+            async def pump(source, destination):
+                while True:
+                    chunk = await asyncio.wait_for(source.read(65536), 300)
+                    if not chunk:
+                        if destination.can_write_eof():
+                            destination.write_eof()
+                        return
+                    destination.write(chunk)
+                    await destination.drain()
+
+            tasks = [asyncio.create_task(pump(reader, upstream)), asyncio.create_task(pump(remote, writer))]
+            try:
+                await asyncio.gather(*tasks)
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        except (OSError, asyncio.TimeoutError):
+            LOG.info('Upstream unavailable for %s:%s', *target)
+        finally:
+            self.active -= 1
+            for stream in (writer, upstream):
+                if stream:
+                    stream.close()
+
+    async def reconcile(self, entries):
+        wanted = {r['publicPort']: (r['address'], r['targetPort']) for r in entries if r['enabled']}
+        # Bind new sockets before removing existing listeners. Bind failure leaves old service intact.
+        added = {}
+        try:
+            for port, target in wanted.items():
+                if port not in self.listeners:
+                    async def accept(reader, writer, p=port):
+                        await self.connect(reader, writer, self.listeners[p][1])
+                    added[port] = (await asyncio.start_server(accept, '0.0.0.0', port, start_serving=False, reuse_address=False), target)
+        except Exception:
+            for server, _ in added.values():
+                server.close()
+                await server.wait_closed()
+            raise
+        self.listeners.update(added)
+        for port in list(self.listeners):
+            if port not in wanted:
+                server, _ = self.listeners.pop(port)
+                server.close()
+                await server.wait_closed()
+            else:
+                self.listeners[port] = (self.listeners[port][0], wanted[port])
+        for server, _ in added.values():
+            await server.start_serving()
+
+    def apply(self, entries):
+        asyncio.run_coroutine_threadsafe(self.reconcile(entries), self.loop).result(20)
+
+
+class App:
+    def __init__(self, config):
+        self.cfg = json.loads(Path(config).read_text())
+        c = self.cfg
+        if c['mode'] not in ('preview', 'live'):
+            raise ValueError('mode must be preview or live')
+        if not 1024 <= c['port_min'] <= c['port_max'] <= 65535 or c['port_max'] - c['port_min'] > 199:
+            raise ValueError('Reserved range must contain at most 200 unprivileged ports')
+        ipaddress.ip_network(c['wireguard_subnet'])
+        if c['secure_cookie'] and not c['origin'].startswith('https://'):
+            raise ValueError('Secure cookies require an HTTPS origin')
+        if not c['secure_cookie'] and c['origin'] not in ('http://localhost:8787', 'http://127.0.0.1:8787'):
+            raise ValueError('Public access requires HTTPS and secure_cookie=true')
+        data = Path(c['data_dir'])
+        data.mkdir(parents=True, exist_ok=True)
+        self.db = sqlite3.connect(data / 'unm.sqlite', check_same_thread=False)
+        self.db.row_factory = sqlite3.Row
+        self.db.executescript('''
+        CREATE TABLE IF NOT EXISTS users(name TEXT PRIMARY KEY, password TEXT NOT NULL, totp TEXT);
+        CREATE TABLE IF NOT EXISTS hosts(id TEXT PRIMARY KEY, address TEXT UNIQUE NOT NULL);
+        CREATE TABLE IF NOT EXISTS servers(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS tokens(id TEXT PRIMARY KEY, hash TEXT NOT NULL, body TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS audit(at INTEGER, actor TEXT, action TEXT, resource TEXT);
+        ''')
+        self.db.commit()
+        self.sessions, self.attempts, self.otp_used = {}, {}, {}
+        self.proxy = Proxy(c) if c['mode'] == 'live' else None
+
+    def audit(self, actor, action, resource):
+        self.db.execute('INSERT INTO audit VALUES(?,?,?,?)', (int(time.time()), actor, action, resource))
+        self.db.execute('DELETE FROM audit WHERE rowid NOT IN (SELECT rowid FROM audit ORDER BY rowid DESC LIMIT 2000)')
+
+    def hosts(self):
+        return [dict(r) for r in self.db.execute('SELECT * FROM hosts ORDER BY id')]
+
+    def servers(self):
+        return [json.loads(r['body']) for r in self.db.execute('SELECT body FROM servers ORDER BY id')]
+
+    def resolved(self, entries):
+        hosts = {h['id']: h['address'] for h in self.hosts()}
+        return [dict(r, address=hosts[r['hostId']]) for r in entries]
+
+    def firewall(self, entries):
+        if self.proxy:
+            ports = sorted(r['publicPort'] for r in entries if r['enabled'])
+            subprocess.run(['sudo', '-n', '/usr/local/sbin/unm-firewall'], input=json.dumps(ports),
+                           text=True, capture_output=True, check=True, timeout=30)
+
+    def apply(self, entries):
+        if self.proxy:
+            self.proxy.apply(self.resolved(entries))
+            self.firewall(entries)
+
+    def validate_server(self, sid, body, scope=None):
+        valid_id(sid)
+        host = body.get('hostId')
+        if host not in {h['id'] for h in self.hosts()}:
+            raise ValueError('Unknown hostId; register this PC first.')
+        for field in ('targetPort', 'publicPort'):
+            if type(body.get(field)) is not int or not 1 <= body[field] <= 65535:
+                raise ValueError(field + ' must be an integer port')
+        port = body['publicPort']
+        if not self.cfg['port_min'] <= port <= self.cfg['port_max']:
+            raise ValueError('Public port is outside the reserved range')
+        if type(body.get('enabled')) is not bool:
+            raise ValueError('enabled must be true or false')
+        hostname = body.get('hostname', '').lower().rstrip('.')
+        suffix = self.cfg['dns_suffix'].lower().rstrip('.')
+        if hostname and (not hostname.endswith('.' + suffix) or len(hostname) > 253 or
+                         any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', p) for p in hostname.split('.'))):
+            raise ValueError('Hostname must be a valid name under ' + suffix)
+        if scope and (sid not in scope['servers'] or host not in scope['hosts'] or
+                      not scope['portMin'] <= port <= scope['portMax']):
+            raise PermissionError('Token does not permit this server, host or public port')
+        for r in self.servers():
+            if r['id'] != sid and (r['publicPort'] == port or (hostname and r['hostname'] == hostname)):
+                raise ValueError('Port or hostname already belongs to another server')
+        old = next((r for r in self.servers() if r['id'] == sid), None)
+        if old and old.get('dnsRecordId') and hostname != old['hostname']:
+            raise ValueError('Remove the managed DNS record before changing its hostname')
+        return dict(id=sid, hostId=host, targetPort=body['targetPort'], publicPort=port,
+                    hostname=hostname, enabled=body['enabled'], dnsRecordId=(old or {}).get('dnsRecordId'),
+                    dnsStatus=(old or {}).get('dnsStatus', 'Not synced'))
+
+    def save_server(self, sid, body, actor, scope=None):
+        item = self.validate_server(sid, body, scope)
+        old = self.servers()
+        desired = [r for r in old if r['id'] != sid] + [item]
+        try:
+            self.apply(desired)
+        except Exception:
+            try:
+                self.apply(old)
+            except Exception:
+                LOG.exception('Rollback failed; administrator intervention required')
+            raise ValueError('Network apply failed; check service logs. Configuration was not saved.')
+        self.db.execute('INSERT OR REPLACE INTO servers VALUES(?,?)', (sid, json.dumps(item)))
+        self.audit(actor, 'server.save', sid)
+        self.db.commit()
+        return item
+
+    def cf(self, method, path, body=None):
+        token = os.environ.get('CLOUDFLARE_API_TOKEN', '')
+        zone = self.cfg['cloudflare_zone_id']
+        if not token or not re.fullmatch(r'[a-f0-9]{32}', zone):
+            raise ValueError('Configure Cloudflare zone ID and CLOUDFLARE_API_TOKEN first')
+        req = Request('https://api.cloudflare.com/client/v4/zones/' + zone + '/dns_records' + path,
+                      data=json.dumps(body).encode() if body is not None else None, method=method,
+                      headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+        with urlopen(req, timeout=15) as response:
+            result = json.load(response)
+        if not result.get('success'):
+            raise ValueError('Cloudflare rejected the DNS change')
+        return result['result']
+
+    def dns(self, sid, remove, actor, scope):
+        item = next((r for r in self.servers() if r['id'] == sid), None)
+        if not item:
+            raise ValueError('Server not found')
+        self.validate_server(sid, item, scope)
+        if self.cfg['mode'] != 'live':
+            raise ValueError('DNS changes are disabled in preview mode')
+        if remove:
+            if item['dnsRecordId']:
+                self.cf('DELETE', '/' + item['dnsRecordId'])
+            item['dnsRecordId'], item['dnsStatus'] = None, 'Removed'
+        else:
+            if not item['hostname']:
+                raise ValueError('Set a hostname first')
+            ip = str(ipaddress.IPv4Address(self.cfg['public_ip']))
+            payload = dict(type='A', name=item['hostname'], content=ip, ttl=120, proxied=False,
+                           comment='UNM managed server: ' + sid)
+            if item['dnsRecordId']:
+                result = self.cf('PUT', '/' + item['dnsRecordId'], payload)
+            else:
+                existing = self.cf('GET', '?' + urlencode({'name': item['hostname']}))
+                if existing:
+                    raise ValueError('DNS name already exists; UNM will not overwrite an unmanaged record')
+                result = self.cf('POST', '', payload)
+            item['dnsRecordId'], item['dnsStatus'] = result['id'], 'Synced'
+        self.db.execute('UPDATE servers SET body=? WHERE id=?', (json.dumps(item), sid))
+        self.audit(actor, 'dns.remove' if remove else 'dns.sync', sid)
+        self.db.commit()
+        return item
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = 'UNM'
+    def log_message(self, *args):
+        pass  # No URLs, credentials or bearer tokens in logs.
+
+    def send(self, status, value, cookie=None, html=False):
+        raw = value.encode() if html else json.dumps(value).encode()
+        self.send_response(status)
+        self.send_header('Content-Type', 'text/html; charset=utf-8' if html else 'application/json')
+        self.send_header('Content-Length', str(len(raw)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+        if cookie:
+            self.send_header('Set-Cookie', cookie)
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def cookie(self, token, age=28800):
+        return 'unm_session=' + token + '; HttpOnly; SameSite=Strict; Path=/; Max-Age=' + str(age) + ('; Secure' if self.app.cfg['secure_cookie'] else '')
+
+    @property
+    def app(self):
+        return self.server.app
+
+    def read_body(self):
+        size = int(self.headers.get('Content-Length', '0'))
+        if not 0 < size <= 16384 or self.headers.get_content_type() != 'application/json':
+            raise ValueError('A JSON body of at most 16KB is required')
+        body = json.loads(self.rfile.read(size))
+        if not isinstance(body, dict):
+            raise ValueError('JSON body must be an object')
+        return body
+
+    def authenticate(self):
+        app = self.app
+        bearer = self.headers.get('Authorization', '')
+        if bearer.startswith('Bearer '):
+            hashed = digest(bearer[7:])
+            for row in app.db.execute('SELECT * FROM tokens'):
+                if hmac.compare_digest(row['hash'], hashed):
+                    scope = json.loads(row['body'])
+                    if scope['expires'] <= time.time():
+                        break
+                    return 'token:' + row['id'], scope, None
+        cookies = SimpleCookie()
+        cookies.load(self.headers.get('Cookie', ''))
+        raw = cookies.get('unm_session')
+        key = digest(raw.value) if raw else ''
+        session = app.sessions.get(key)
+        if session and session['expires'] > time.time():
+            if self.command != 'GET':
+                if self.headers.get('Origin') != app.cfg['origin'] or not hmac.compare_digest(self.headers.get('X-CSRF-Token', ''), session['csrf']):
+                    raise PermissionError('Invalid origin or CSRF token')
+            return session['name'], None, session
+        raise PermissionError('Authentication required')
+
+    def route(self):
+        path = urlsplit(self.path).path
+        app = self.app
+        if self.command == 'GET' and path in ('/', '/app.js', '/style.css'):
+            filename = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css'}[path]
+            if path == '/':
+                self.send(200, (ROOT / 'web' / filename).read_text(encoding='utf-8'), html=True)
+            else:
+                raw = (ROOT / 'web' / filename).read_bytes()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/javascript' if path.endswith('.js') else 'text/css')
+                self.send_header('Content-Length', str(len(raw)))
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.end_headers()
+                self.wfile.write(raw)
+            return
+        if path == '/healthz' and self.command == 'GET':
+            return self.send(200, {'ok': True, 'mode': app.cfg['mode']})
+        if path == '/api/login' and self.command == 'POST':
+            if self.headers.get('Origin') != app.cfg['origin']:
+                raise PermissionError('Invalid origin')
+            now = time.time()
+            app.attempts = {k: v for k, v in app.attempts.items() if v[1] > now}
+            count, expiry = app.attempts.get('global', (0, now + 60))
+            if count >= 15:
+                return self.send(429, {'error': 'Too many login attempts. Try again in a minute.'})
+            app.attempts['global'] = (count + 1, expiry)
+            body = self.read_body()
+            row = app.db.execute('SELECT * FROM users WHERE name=?', (body.get('username'),)).fetchone()
+            stored = row['password'] if row else '00' * 16 + ':' + '00' * 32
+            supplied = password_hash(str(body.get('password', '')), stored.split(':')[0])
+            if not row or not hmac.compare_digest(stored, supplied):
+                return self.send(401, {'error': 'Incorrect username or password'})
+            if row['totp']:
+                valid = next((step for step in (-1, 0, 1) if hmac.compare_digest(
+                    totp(row['totp'], now + step * 30), str(body.get('code', '')))), None)
+                counter = int(now // 30) + valid if valid is not None else -1
+                if valid is None or counter <= app.otp_used.get(row['name'], -1):
+                    return self.send(401, {'error': 'Invalid or already used authenticator code'})
+                app.otp_used[row['name']] = counter
+            app.sessions = {k: v for k, v in app.sessions.items() if v['expires'] > now}
+            token = secrets.token_urlsafe(32)
+            app.sessions[digest(token)] = dict(name=row['name'], expires=now + 28800, csrf=secrets.token_urlsafe(24))
+            app.audit(row['name'], 'login', '')
+            app.db.commit()
+            return self.send(200, {'ok': True}, cookie=self.cookie(token))
+        actor, scope, session = self.authenticate()
+        if path == '/api/state' and self.command == 'GET':
+            if scope:
+                raise PermissionError('Use the launcher API')
+            tokens = [dict(id=r['id'], **json.loads(r['body'])) for r in app.db.execute('SELECT * FROM tokens')]
+            return self.send(200, dict(user=actor, csrf=session['csrf'], hosts=app.hosts(), servers=app.servers(), tokens=tokens,
+                                      mode=app.cfg['mode'], portMin=app.cfg['port_min'], portMax=app.cfg['port_max'],
+                                      dnsSuffix=app.cfg['dns_suffix'], audit=[dict(r) for r in app.db.execute('SELECT * FROM audit ORDER BY rowid DESC LIMIT 40')]))
+        if path == '/api/logout' and self.command == 'POST' and session:
+            app.sessions = {k: v for k, v in app.sessions.items() if v is not session}
+            return self.send(200, {'ok': True}, cookie=self.cookie('', 0))
+        if path == '/api/hosts' and self.command == 'POST':
+            if scope:
+                raise PermissionError('Admin only')
+            body = self.read_body()
+            hid = valid_id(body.get('id'))
+            address = ipaddress.ip_address(body['address'])
+            if address.version != 4 or address not in ipaddress.ip_network(app.cfg['wireguard_subnet']):
+                raise ValueError('Host must be an IPv4 address inside your WireGuard subnet')
+            if any(r['hostId'] == hid for r in app.servers()):
+                raise ValueError('Disable and delete this host’s servers before changing its address')
+            app.db.execute('INSERT OR REPLACE INTO hosts VALUES(?,?)', (hid, str(address)))
+            app.audit(actor, 'host.save', hid)
+            app.db.commit()
+            return self.send(200, {'ok': True})
+        if path == '/api/tokens' and self.command == 'POST':
+            if scope:
+                raise PermissionError('Admin only')
+            body = self.read_body()
+            tid = valid_id(body['id'])
+            hosts, servers = body.get('hosts'), body.get('servers')
+            if not isinstance(hosts, list) or not hosts or not set(hosts) <= {h['id'] for h in app.hosts()}:
+                raise ValueError('Choose registered hosts')
+            if not isinstance(servers, list) or not servers or len(servers) > 100:
+                raise ValueError('Specify server IDs')
+            for sid in servers:
+                valid_id(sid)
+            low, high = body.get('portMin'), body.get('portMax')
+            days = body.get('days', 30)
+            if type(low) is not int or type(high) is not int or not app.cfg['port_min'] <= low <= high <= app.cfg['port_max']:
+                raise ValueError('Invalid token port range')
+            if type(days) is not int or not 1 <= days <= 365:
+                raise ValueError('Expiry must be 1–365 days')
+            secret = secrets.token_urlsafe(40)
+            record = dict(hosts=hosts, servers=servers, portMin=low, portMax=high, expires=int(time.time()) + days * 86400)
+            app.db.execute('INSERT OR REPLACE INTO tokens VALUES(?,?,?)', (tid, digest(secret), json.dumps(record)))
+            app.audit(actor, 'token.create', tid)
+            app.db.commit()
+            return self.send(201, {'token': secret, 'id': tid})
+        parts = path.strip('/').split('/')
+        if len(parts) == 3 and parts[:2] == ['api', 'tokens'] and self.command == 'DELETE':
+            if scope:
+                raise PermissionError('Admin only')
+            app.db.execute('DELETE FROM tokens WHERE id=?', (parts[2],))
+            app.audit(actor, 'token.revoke', parts[2])
+            app.db.commit()
+            return self.send(200, {'ok': True})
+        prefix = '/api/v1/minecraft/servers/'
+        if path.startswith(prefix):
+            rest = path[len(prefix):].split('/')
+            sid = valid_id(rest[0])
+            item = next((r for r in app.servers() if r['id'] == sid), None)
+            if scope and (sid not in scope['servers'] or (item and (item['hostId'] not in scope['hosts'] or not scope['portMin'] <= item['publicPort'] <= scope['portMax']))):
+                raise PermissionError('Server outside token scope')
+            if len(rest) == 2 and rest[1] == 'dns' and self.command in ('POST', 'DELETE'):
+                return self.send(200, app.dns(sid, self.command == 'DELETE', actor, scope))
+            if len(rest) != 1:
+                return self.send(404, {'error': 'Route not found'})
+            if self.command == 'GET':
+                return self.send(200 if item else 404, item or {'error': 'Server not found'})
+            if self.command == 'PUT':
+                return self.send(200, app.save_server(sid, self.read_body(), actor, scope))
+            if self.command == 'DELETE':
+                if not item:
+                    return self.send(200, {'ok': True})
+                if item.get('dnsRecordId'):
+                    raise ValueError('Remove this server’s managed DNS record first')
+                app.save_server(sid, dict(item, enabled=False), actor, scope)
+                app.db.execute('DELETE FROM servers WHERE id=?', (sid,))
+                app.audit(actor, 'server.delete', sid)
+                app.db.commit()
+                return self.send(200, {'ok': True})
+        self.send(404, {'error': 'Route not found'})
+
+    def handle_request(self):
+        self.connection.settimeout(15)
+        try:
+            with LOCK:
+                self.route()
+        except PermissionError as exc:
+            self.send(403, {'error': str(exc)})
+        except (ValueError, KeyError, TypeError, sqlite3.IntegrityError) as exc:
+            self.send(400, {'error': str(exc)})
+        except Exception:
+            LOG.exception('Request failed')
+            self.send(503, {'error': 'Operation failed. Check UNM logs; no success is implied.'})
+
+    do_GET = do_POST = do_PUT = do_DELETE = handle_request
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', default='config.json')
+    parser.add_argument('command', choices=['serve', 'create-admin', 'enable-totp', 'check'], nargs='?', default='serve')
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO)
+    app = App(args.config)
+    if args.command == 'create-admin':
+        name = valid_id(input('Admin username: ').strip())
+        password = getpass.getpass('Password (at least 14 characters): ')
+        if len(password) < 14 or password != getpass.getpass('Confirm password: '):
+            raise SystemExit('Password too short or confirmation mismatch')
+        app.db.execute('INSERT INTO users(name,password) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET password=excluded.password', (name, password_hash(password)))
+        app.db.commit()
+        print('Admin saved. Restart UNM to revoke existing browser sessions.')
+        return
+    if args.command == 'enable-totp':
+        name = valid_id(input('Existing admin username: ').strip())
+        if not app.db.execute('SELECT 1 FROM users WHERE name=?', (name,)).fetchone():
+            raise SystemExit('Account not found')
+        secret = base64.b32encode(secrets.token_bytes(20)).decode()
+        print('Add this secret to your authenticator app:', secret)
+        print('Type: TOTP, SHA1, 6 digits, 30 seconds. Keep a private backup of the secret.')
+        code = input('Current 6-digit code: ').strip()
+        if not any(hmac.compare_digest(totp(secret, time.time() + offset), code) for offset in (-30, 0, 30)):
+            raise SystemExit('Code mismatch; no changes made')
+        app.db.execute('UPDATE users SET totp=? WHERE name=?', (secret, name))
+        app.db.commit()
+        print('Two-factor authentication enabled. Restart UNM to revoke existing sessions.')
+        return
+    if args.command == 'check':
+        for entry in app.servers():
+            app.validate_server(entry['id'], entry)
+        print('Configuration and stored servers validated; no rules applied.')
+        return
+    if not app.db.execute('SELECT 1 FROM users LIMIT 1').fetchone():
+        raise SystemExit('Create an admin before starting the service')
+    app.apply(app.servers())
+    server = ThreadingHTTPServer((app.cfg['bind'], app.cfg['port']), Handler)
+    server.app = app
+    LOG.info('UNM listening on %s:%s in %s mode', app.cfg['bind'], app.cfg['port'], app.cfg['mode'])
+    server.serve_forever()
+
+
+if __name__ == '__main__':
+    main()

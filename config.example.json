@@ -1,0 +1,16 @@
+{
+  "bind": "127.0.0.1",
+  "port": 8787,
+  "origin": "http://localhost:8787",
+  "secure_cookie": false,
+  "data_dir": "data",
+  "mode": "preview",
+  "wireguard_subnet": "10.8.0.0/24",
+  "public_ip": "",
+  "dns_suffix": "games.example.com",
+  "cloudflare_zone_id": "",
+  "port_min": 25565,
+  "port_max": 25600,
+  "firewall_zone": "public",
+  "max_connections": 256
+}

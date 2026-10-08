@@ -1,0 +1,24 @@
+[Unit]
+Description=Ubuntu Network Manager
+After=network-online.target firewalld.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=unm
+Group=unm
+WorkingDirectory=/opt/unm
+EnvironmentFile=-/etc/unm/secrets.env
+ExecStart=/usr/bin/python3 /opt/unm/unm.py --config /etc/unm/config.json serve
+Restart=on-failure
+RestartSec=5
+UMask=0077
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/unm /var/lib/unm-firewall
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

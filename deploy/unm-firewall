@@ -1,0 +1,63 @@
+#!/usr/bin/python3 -I
+"""Root-owned helper: only manage ports in an explicitly reserved range."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import fcntl
+
+BASE = Path('/var/lib/unm-firewall')
+CONFIG = Path('/etc/unm/firewall.json')
+
+def run(zone, action, port, permanent=False):
+    command = ['/usr/bin/firewall-cmd', '--zone=' + zone]
+    if permanent:
+        command.append('--permanent')
+    command.append('--' + action + '-port=' + str(port) + '/tcp')
+    return subprocess.run(command, capture_output=True, text=True, timeout=10)
+
+def main():
+    if os.geteuid() != 0:
+        raise SystemExit('Root required')
+    config = json.loads(CONFIG.read_text())
+    low, high, zone = config['port_min'], config['port_max'], config['firewall_zone']
+    desired = json.loads(sys.stdin.read(4096))
+    if not isinstance(desired, list) or len(desired) > 200 or any(type(p) is not int or not low <= p <= high for p in desired):
+        raise SystemExit('Invalid reserved port list')
+    desired = set(desired)
+    with (BASE / 'lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = BASE / 'ports.json'
+        old = set(json.loads(state.read_text())) if state.exists() else set()
+        # Refuse to adopt direct port rules belonging to another administrator.
+        for port in desired - old:
+            for permanent in (False, True):
+                result = run(zone, 'query', port, permanent)
+                if result.returncode == 0:
+                    raise SystemExit('Port already has an unmanaged firewall rule: ' + str(port))
+                if result.returncode != 1:
+                    raise SystemExit('Cannot query firewall')
+        snapshot = {}
+        for port in old | desired:
+            for permanent in (False, True):
+                result = run(zone, 'query', port, permanent)
+                if result.returncode not in (0, 1):
+                    raise SystemExit('Cannot query firewall')
+                snapshot[port, permanent] = result.returncode == 0
+        try:
+            for port in old | desired:
+                for permanent in (False, True):
+                    if run(zone, 'add' if port in desired else 'remove', port, permanent).returncode != 0:
+                        raise RuntimeError('Firewall change failed')
+            temp = BASE / 'ports.tmp'
+            temp.write_text(json.dumps(sorted(desired)))
+            temp.replace(state)
+        except Exception:
+            failed = False
+            for (port, permanent), existed in snapshot.items():
+                failed |= run(zone, 'add' if existed else 'remove', port, permanent).returncode != 0
+            raise SystemExit('Firewall apply failed; rollback ' + ('FAILED' if failed else 'completed'))
+
+if __name__ == '__main__':
+    main()
