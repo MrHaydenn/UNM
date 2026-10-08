@@ -45,11 +45,12 @@ async function refresh() {
   ].join('') || empty('No managed port allowances yet.');
   const fw=state.firewall; const active=fw.running??fw.enabled; $('firewall-master').setAttribute('aria-checked',String(active)); $('firewall-master').textContent=active?'On':'Off'; $('firewall-master').disabled=state.mode==='live'&&!fw.controllable; $('firewall-status').textContent=fw.preview?'Preview · saved setting '+(fw.enabled?'on':'off'):fw.running===null?'Service status unavailable':(fw.running?'Running':'Stopped')+(fw.controllable?'':' · service control disabled in VPS settings');
   renderServices();
+  renderIntegrationKeys();
   await renderTraffic();
   $('audit-list').innerHTML='<table><thead><tr><th>Time</th><th>Account</th><th>Change</th><th>Resource</th></tr></thead><tbody>'+state.audit.map(a=>'<tr><td>'+esc(new Date(a.at*1000).toLocaleString())+'</td><td>'+esc(a.actor)+'</td><td>'+esc(a.action)+'</td><td>'+esc(a.resource)+'</td></tr>').join('')+'</tbody></table>';
 }
 $('login-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{await request('/api/login','POST',Object.fromEntries(new FormData(e.target)));e.target.reset();await refresh();});};
-$('logout').onclick=()=>attempt(async()=>{await request('/api/logout','POST',{});clearConfiguration();location.reload();});
+$('logout').onclick=()=>attempt(async()=>{await request('/api/logout','POST',{});clearConfiguration();clearKey();location.reload();});
 $('refresh').onclick=()=>attempt(refresh);
 document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{document.querySelectorAll('.tab').forEach(tab=>tab.hidden=tab.id!==button.dataset.tab);document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('selected',b===button));notice();});
 function edit(rule) {
@@ -122,7 +123,7 @@ function rate(n){return (n*8/1000000).toFixed(3)+' Mbit/s';}
 async function renderTraffic(){const t=await request('/api/traffic?days='+$('traffic-period').value);$('traffic-note').textContent=t.message;$('traffic-stats').innerHTML=[['Received',bytes(t.rx)],['Sent',bytes(t.tx)],['Receive rate',rate(t.rxRate)],['Send rate',rate(t.txRate)]].map(([label,value])=>'<div class="stat"><b>'+value+'</b><span>'+label+'</span></div>').join('');$('traffic-peers').innerHTML=t.peers.map(p=>{const host=state.hosts.find(h=>peerForHost(h)?.publicKey===p.peer);return '<article class="card"><div><h3>'+esc(host?.id||'Unregistered peer '+p.peer.slice(0,8))+'</h3><p>Received '+bytes(p.rx)+' · Sent '+bytes(p.tx)+'</p><p>'+rate(p.rxRate)+' in · '+rate(p.txRate)+' out</p></div></article>';}).join('')||empty('Waiting for the first successful traffic sample.');$('traffic-daily').innerHTML='<table><thead><tr><th>Day</th><th>Received</th><th>Sent</th></tr></thead><tbody>'+t.daily.map(d=>'<tr><td>'+esc(d.day)+'</td><td>'+bytes(d.rx)+'</td><td>'+bytes(d.tx)+'</td></tr>').join('')+'</tbody></table>';}
 $('traffic-period').onchange=()=>attempt(renderTraffic);
 $('firewall-master').onclick=()=>attempt(async()=>{const enabled=!((state.firewall.running??state.firewall.enabled));if(!enabled&&state.mode==='live'&&!confirm('Stop all of firewalld? This removes firewall protection for every service on the VPS.'))return;await request('/api/firewall/service','POST',{enabled});await refresh();});
-setInterval(()=>{if(state && $('forward-form').hidden && $('host-form').hidden && $('firewall-form').hidden && $('host-config').hidden && $('website-form').hidden && $('dns-form').hidden)refresh().catch(()=>{});},60000);
+setInterval(()=>{if(state && $('forward-form').hidden && $('host-form').hidden && $('firewall-form').hidden && $('host-config').hidden && $('website-form').hidden && $('dns-form').hidden && $('key-form').hidden)refresh().catch(()=>{});},60000);
 
 function renderServices(){
   const services=state.services;
@@ -146,3 +147,16 @@ $('dns-list').onclick=e=>attempt(async()=>{const button=e.target.closest('[data-
 $('apply-websites').onclick=()=>attempt(async()=>{await request('/api/websites/apply','POST',{});await refresh();notice(state.mode==='preview'?'Preview: saved websites were not applied.':'Saved websites applied. Certificate issuance runs automatically; refresh for status.');});
 $('apply-dns').onclick=()=>attempt(async()=>{await request('/api/dns-records/apply','POST',{});await refresh();notice(state.mode==='preview'?'Preview: saved DNS records were not applied.':'Saved DNS records applied.');});
 $('legacy-dns').onclick=e=>attempt(async()=>{const button=e.target.closest('[data-legacy-dns]');if(!button||!confirm('Remove this existing Cloudflare DNS record?'))return;await request(endpoint(button.dataset.legacyDns)+'/dns','DELETE');await refresh();});
+
+function clearKey() { $('key-token').value=''; $('key-secret').hidden=true; }
+function showKey(result) { clearKey(); $('key-token').value=result.token; $('key-secret').hidden=false; $('key-secret').scrollIntoView({behavior:'smooth',block:'center'}); }
+function renderIntegrationKeys() {
+  $('new-key').disabled=!(state.services.zones||[]).length;
+  $('key-list').innerHTML=(state.integrationKeys||[]).map(k=>'<article class="card"><div><h3>'+esc(k.name)+'</h3><p>DNS publishing · '+esc(k.zone)+'</p></div><div class="actions"><button data-key-action="rename" data-id="'+esc(k.id)+'">Rename</button><button data-key-action="rotate" data-id="'+esc(k.id)+'">Rotate</button><button data-key-action="revoke" data-id="'+esc(k.id)+'">Revoke</button></div></article>').join('')||empty('No integration keys. Generate a named key for MMSM.');
+}
+$('new-key').onclick=()=>{clearKey();const f=$('key-form');f.reset();f.elements.zone.innerHTML=(state.services.zones||[]).map(z=>'<option>'+esc(z)+'</option>').join('');f.hidden=false;};
+$('cancel-key').onclick=()=>$('key-form').hidden=true;
+$('key-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{const f=e.target;const button=f.querySelector('button');button.disabled=true;try{const result=await request('/api/integration-keys','POST',Object.fromEntries(new FormData(f)));f.hidden=true;showKey(result);await refresh();}finally{button.disabled=false;}});};
+$('clear-key').onclick=clearKey;
+$('copy-key').onclick=async()=>{try{await navigator.clipboard.writeText($('key-token').value);notice('Token copied. Paste it into MMSM and save settings.');}catch(error){$('key-token').focus();$('key-token').select();notice('Press Ctrl+C to copy the selected token.');}};
+$('key-list').onclick=e=>attempt(async()=>{const b=e.target.closest('[data-key-action]');if(!b)return;const key=state.integrationKeys.find(k=>k.id===b.dataset.id);const path='/api/integration-keys/'+encodeURIComponent(key.id);const action=b.dataset.keyAction;if(action==='rename'){const name=prompt('Key name',key.name);if(name===null)return;await request(path,'PUT',{name});}else if(action==='rotate'){if(!confirm('Replace the token for '+key.name+'? Update MMSM with the new token. Existing DNS records keep their ownership.'))return;showKey(await request(path+'/rotate','POST',{}));}else{if(!confirm('Revoke '+key.name+'? Its token will stop working. Existing DNS records remain published.'))return;await request(path,'DELETE');clearKey();}await refresh();});

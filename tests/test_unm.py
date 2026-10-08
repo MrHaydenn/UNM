@@ -75,6 +75,42 @@ class ControlTests(unittest.TestCase):
     def body(self, **kwargs):
         return dict(hostId='pc', targetPort=8080, publicPort=20080, enabled=True, hostname='media.hosts.example.com', **kwargs)
 
+    def test_integration_key_management_security_and_rotation(self):
+        route = '/api/integration-keys'
+        body = {'name': 'MMSM Home Server', 'zone': 'minecraft.example.com'}
+        self.assertEqual(self.req(route, 'POST', body)[0], 403)
+        self.login()
+        self.assertEqual(self.req(route, 'POST', body, csrf=False)[0], 403)
+        self.assertEqual(self.req(route, 'POST', body, origin=False)[0], 403)
+        with patch.object(self.app, 'services_status', return_value={'zones': ['minecraft.example.com']}):
+            self.assertEqual(self.req(route, 'POST', {**body, 'zone': 'other.example.com'})[0], 400)
+            self.assertEqual(self.req(route, 'POST', {**body, 'name': ''})[0], 400)
+            code, created = self.req(route, 'POST', body)
+        self.assertEqual(code, 201)
+        token = created['token']
+        key_id = created['id']
+        self.assertEqual(self.app.dns_client('Bearer ' + token)['id'], key_id)
+        self.assertEqual(self.req(route, bearer=token)[0], 403)
+        code, listing = self.req(route)
+        self.assertEqual(listing, [{'id': key_id, 'name': body['name'], 'zone': body['zone']}])
+        self.assertNotIn(token, json.dumps(self.req('/api/state')[1]))
+        self.assertNotIn(token, self.app.db.execute('SELECT hash FROM dns_clients WHERE id=?', (key_id,)).fetchone()['hash'])
+        self.app.db.execute('INSERT INTO dns_publications VALUES(?,?,?)', (key_id, 'server1', '{"recordIds": ["retained"]}'))
+        self.app.db.commit()
+        path = route + '/' + key_id
+        self.assertEqual(self.req(path, 'PUT', {'name': 'Renamed'})[0], 200)
+        self.assertEqual(self.req(route)[1][0]['name'], 'Renamed')
+        code, rotated = self.req(path + '/rotate', 'POST', {})
+        self.assertEqual(code, 200)
+        with self.assertRaises(PermissionError):
+            self.app.dns_client('Bearer ' + token)
+        self.assertEqual(self.app.dns_client('Bearer ' + rotated['token'])['id'], key_id)
+        self.assertEqual(self.req(path, 'DELETE')[0], 200)
+        with self.assertRaises(PermissionError):
+            self.app.dns_client('Bearer ' + rotated['token'])
+        self.assertEqual(self.req(route)[1], [])
+        self.assertIsNotNone(self.app.db.execute('SELECT body FROM dns_publications WHERE client=?', (key_id,)).fetchone())
+
     def test_auth_csrf_and_session_logout(self):
         self.assertEqual(self.req('/api/state')[0], 403)
         self.assertEqual(self.req('/api/login', 'POST', {'username': 'admin', 'password': 'wrong'})[0], 401)

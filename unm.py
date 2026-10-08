@@ -425,11 +425,24 @@ class Handler(BaseHTTPRequestHandler):
             result=app.publish_server_dns(client,path[len('/api/integrations/servers/'):],self.read_body() if self.command=='PUT' else None)
             return self.send(200,result)
         actor, scope, session = self.authenticate()
+        if path == '/api/integration-keys':
+            if self.command == 'GET':
+                return self.send(200, app.integration_keys())
+            if self.command == 'POST':
+                return self.send(201, app.manage_integration_key(actor, 'create', body=self.read_body()))
+        key_parts = path.strip('/').split('/')
+        if len(key_parts) in (3, 4) and key_parts[:2] == ['api', 'integration-keys']:
+            key_id = valid_id(key_parts[2])
+            if len(key_parts) == 4 and key_parts[3] == 'rotate' and self.command == 'POST':
+                return self.send(200, app.manage_integration_key(actor, 'rotate', key_id))
+            if len(key_parts) == 3 and self.command in ('PUT', 'DELETE'):
+                action = 'rename' if self.command == 'PUT' else 'revoke'
+                return self.send(200, app.manage_integration_key(actor, action, key_id, self.read_body() if action == 'rename' else None))
         if path == '/api/state' and self.command == 'GET':
             return self.send(200, dict(user=actor, csrf=session['csrf'], hosts=app.hosts(), forwards=app.servers(),
                                       firewallRules=app.firewall_rules(), wireguard=app.wg_status(),
                                       firewall=app.firewall_state(),traffic=app.traffic_summary(30),
-                                      websites=app.proxy_hosts(),dnsRecords=app.dns_records(),services=app.services_status(),
+                                      websites=app.proxy_hosts(),dnsRecords=app.dns_records(),services=app.services_status(),integrationKeys=app.integration_keys(),
                                       mode=app.cfg['mode'], portMin=app.cfg['port_min'], portMax=app.cfg['port_max'],
                                       subnet=app.cfg['wireguard_subnet'], dnsSuffix=app.cfg['dns_suffix'],
                                       audit=[dict(r) for r in app.db.execute('SELECT * FROM audit ORDER BY rowid DESC LIMIT 40')]))

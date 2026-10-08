@@ -115,3 +115,24 @@ dig _minecraft._tcp.trigun.minecraft.mrhaydenn.us SRV
 Stop unm-caddy before restarting NPM to release 80/443. NPM volumes and old settings remain intact. Disabling a website does not delete its certificates. To roll back DNS, restore the previous Cloudflare records/delegation; cached NS records can continue sending clients to BIND, so keep it serving the old zone until caches expire. Stopping UNM itself leaves Caddy/BIND running from their last applied configs.
 
 References: [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https), [Caddy reverse proxy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy), [Cloudflare delegation](https://developers.cloudflare.com/dns/manage-dns-records/how-to/subdomains-outside-cloudflare/), [BIND authoritative configuration](https://bind9.readthedocs.io/en/v9.18.41/reference.html).
+
+
+### Named integration keys in the panel
+
+Open **Integration keys** to generate a named, zone-scoped DNS publishing token.
+Copy the token into MMSM and save its settings; the token is displayed only once.
+Existing command-line clients appear using their original names. Use **Rotate** on
+that existing client when replacing a lost token: its DNS record ownership remains
+unchanged. **Rename** changes only its display name. **Revoke** immediately rejects
+future authentication and leaves published DNS records in place. Creating a different
+client does not transfer ownership of an existing client's records.
+
+The integration token is separate from the SSH private key. On the Windows MMSM
+host, find the previously generated SSH key without displaying its contents:
+
+```powershell
+Get-Item "$env:USERPROFILE\.ssh\unm_mmsm" | Select-Object -ExpandProperty FullName
+```
+
+Use the private file without `.pub`, and the VPS account whose authorized_keys
+contains its public key (in the documented setup, `root`).

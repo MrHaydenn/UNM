@@ -15,20 +15,59 @@ class Integrations:
         CREATE TABLE IF NOT EXISTS dns_clients(id TEXT PRIMARY KEY, hash TEXT NOT NULL, zone TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS dns_publications(client TEXT, server TEXT, body TEXT NOT NULL, PRIMARY KEY(client,server));
         """)
+        if 'name' not in [row['name'] for row in self.db.execute('PRAGMA table_info(dns_clients)')]:
+            self.db.execute("ALTER TABLE dns_clients ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+            self.db.execute('UPDATE dns_clients SET name=id')
         self.db.commit()
+
+    def integration_keys(self):
+        return [dict(row) for row in self.db.execute('SELECT id,name,zone FROM dns_clients ORDER BY name,id')]
+
+    @staticmethod
+    def integration_name(name):
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80 or any(ord(c) < 32 for c in name):
+            raise ValueError('Enter a key name of 1 to 80 characters')
+        return name.strip()
+
+    def manage_integration_key(self, actor, action, key_id=None, body=None):
+        body = body or {}
+        with self.integration_lock:
+            if action == 'create':
+                name = self.integration_name(body.get('name'))
+                key_id = 'client-' + secrets.token_hex(12)
+                token = self.create_dns_client(key_id, body.get('zone'), name)
+            else:
+                row = self.db.execute('SELECT id FROM dns_clients WHERE id=?', (key_id,)).fetchone()
+                if not row:
+                    raise ValueError('Integration key no longer exists')
+                if action == 'rotate':
+                    token = secrets.token_urlsafe(32)
+                    self.db.execute('UPDATE dns_clients SET hash=? WHERE id=?', (hashlib.sha256(token.encode()).hexdigest(), key_id))
+                elif action == 'rename':
+                    self.db.execute('UPDATE dns_clients SET name=? WHERE id=?', (self.integration_name(body.get('name')), key_id))
+                elif action == 'revoke':
+                    self.db.execute('DELETE FROM dns_clients WHERE id=?', (key_id,))
+                else:
+                    raise ValueError('Unknown key action')
+            self.audit(actor, 'integration.' + action, key_id)
+            self.db.commit()
+            result = {'ok': True, 'id': key_id}
+            if action in ('create', 'rotate'):
+                result['token'] = token
+            return result
 
     def assert_dns_unmanaged(self, rid):
         for row in self.db.execute('SELECT body FROM dns_publications'):
             if rid in json.loads(row['body']).get('recordIds',[]):
                 raise ValueError('This record is managed by an integration; change its address in MMSM')
 
-    def create_dns_client(self, name, zone):
+    def create_dns_client(self, name, zone, display_name=None):
         if not re.fullmatch(r'[a-z0-9-]{1,48}', name):
             raise ValueError('Use lowercase letters, digits and hyphens for the client name')
         if zone not in self.services_status()['zones']:
             raise ValueError('Choose a configured DNS zone')
         token = secrets.token_urlsafe(32)
-        self.db.execute('INSERT INTO dns_clients VALUES(?,?,?)', (name,hashlib.sha256(token.encode()).hexdigest(),zone))
+        self.db.execute('INSERT INTO dns_clients(id,hash,zone,name) VALUES(?,?,?,?)', (name,hashlib.sha256(token.encode()).hexdigest(),zone,self.integration_name(display_name or name)))
         self.db.commit()
         return token
 
