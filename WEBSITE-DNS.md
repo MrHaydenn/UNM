@@ -161,3 +161,26 @@ use the public HTTPS address instead.
 In MMSM, disable automatic SSH, set UNM URL to `https://unm.mrhaydenn.us:8787`,
 keep the integration token, and save settings before testing the connection.
 The private SSH key field is no longer needed for this connection.
+
+
+### Settings and services on the VPS
+
+After a one-time `sudo bash /opt/unm/deploy/update.sh`, Settings includes **Update
+from GitHub**. It pulls the latest main push, backs up data and configuration, runs
+tests and restarts UNM with rollback on failure. Reload and sign in after restart.
+The update runs as a separate systemd service; diagnostics are available with
+`sudo journalctl -u unm-update --no-pager`.
+
+For websites hosted on the VPS, select **This VPS** under Websites / SSL and enter
+the local app port. Caddy connects to 127.0.0.1 and handles automatic certificates.
+You only need public 80/443 for this website; the backend port can remain private.
+For direct TCP/UDP access to a service listening on the VPS public interface, add a
+firewall allowance instead of a WireGuard forwarding rule.
+
+Live mode does not automatically enable peer provisioning. In Settings, enter the
+public WireGuard endpoint (IP or hostname plus its actual UDP listen port), then
+click **Enable peer provisioning**. UNM checks the existing interface against the
+panel subnet and updates only its provisioning settings. Existing peers and their
+configuration are preserved. SaveConfig=true must first be changed to false in the
+WireGuard interface configuration. Keep its UDP listen port allowed through both
+firewalld and any DigitalOcean cloud firewall.

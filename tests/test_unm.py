@@ -111,6 +111,18 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.req(route)[1], [])
         self.assertIsNotNone(self.app.db.execute('SELECT body FROM dns_publications WHERE client=?', (key_id,)).fetchone())
 
+    def test_vps_website_destination_and_management_csrf(self):
+        self.login()
+        body=dict(name='VPS service',hostId='@vps',domains=['local.example.com'],port=8685,scheme='http',ssl=True,enabled=True)
+        code, result=self.req('/api/websites','POST',body)
+        self.assertEqual(code,200)
+        self.assertEqual(self.app.proxy_hosts()[0]['hostId'], '@vps')
+        self.assertEqual(self.req('/api/update','POST',{},csrf=False)[0],403)
+        self.assertEqual(self.req('/api/wireguard/provisioning','POST',{'endpoint':'203.0.113.1:51820'},csrf=False)[0],403)
+        with patch.object(self.app,'wg_call',return_value={'provisioningEnabled':True}) as call:
+            self.assertEqual(self.req('/api/wireguard/provisioning','POST',{'endpoint':'203.0.113.1:51820'})[0],200)
+            call.assert_called_once_with({'action':'configure','endpoint':'203.0.113.1:51820'})
+
     def test_auth_csrf_and_session_logout(self):
         self.assertEqual(self.req('/api/state')[0], 403)
         self.assertEqual(self.req('/api/login', 'POST', {'username': 'admin', 'password': 'wrong'})[0], 401)

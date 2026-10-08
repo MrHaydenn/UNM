@@ -438,7 +438,14 @@ class Handler(BaseHTTPRequestHandler):
             if len(key_parts) == 3 and self.command in ('PUT', 'DELETE'):
                 action = 'rename' if self.command == 'PUT' else 'revoke'
                 return self.send(200, app.manage_integration_key(actor, action, key_id, self.read_body() if action == 'rename' else None))
-        if path == '/api/state' and self.command == 'GET':
+        if path == '/api/update' and self.command in ('GET','POST'):
+            result = subprocess.run(['sudo','-n','/usr/local/sbin/unm-update'],input=json.dumps({'action':'start' if self.command=='POST' else 'status'}),capture_output=True,text=True,timeout=15)
+            if result.returncode: raise ValueError('Update helper is not installed; run the VPS update script once first')
+            return self.send(202 if self.command=='POST' else 200,json.loads(result.stdout))
+        if path == '/api/wireguard/provisioning' and self.command == 'POST':
+            body = self.read_body()
+            return self.send(200, app.wg_call({'action':'configure','endpoint':body.get('endpoint','')}))
+        if path == '/api/state'  and self.command == 'GET':
             return self.send(200, dict(user=actor, csrf=session['csrf'], hosts=app.hosts(), forwards=app.servers(),
                                       firewallRules=app.firewall_rules(), wireguard=app.wg_status(),
                                       firewall=app.firewall_state(),traffic=app.traffic_summary(30),

@@ -28,6 +28,9 @@ class SchemaTests(unittest.TestCase):
     def test_web_scope_and_config_injection(self):
         base=dict(domains=['site.example.com'],address='10.7.0.2',port=8080,scheme='http',ssl=True,enabled=True)
         self.assertEqual(proxy(base,'10.7.0.0/24')['port'],8080)
+        local = proxy(dict(base,address='127.0.0.1',hostId='@vps'),'10.7.0.0/24')
+        self.assertEqual(local['hostId'], '@vps')
+        with self.assertRaises(ValueError): proxy(dict(base,address='192.168.0.1',hostId='@vps'),'10.7.0.0/24')
         for changed in (dict(address='127.0.0.1'),dict(domains=['*.example.com']),dict(domains=['example.com { respond secret }']),dict(port=True),dict(scheme='file')):
             with self.assertRaises(ValueError):proxy(dict(base,**changed),'10.7.0.0/24')
 

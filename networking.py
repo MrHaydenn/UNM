@@ -78,8 +78,10 @@ class Networking:
             status = self.wg_status()
             if not status['available']:
                 raise ValueError(status['message'])
-            if self.cfg['mode'] != 'live' or not status.get('provisioningEnabled', True):
-                raise ValueError('New peer creation requires live mode and enabled VPS provisioning')
+            if self.cfg['mode'] != 'live':
+                raise ValueError('Panel is in preview mode; enable live mode on the VPS first')
+            if not status.get('provisioningEnabled', True):
+                raise ValueError('WireGuard provisioning is disabled; enable it in Settings. The panel is already in live mode.')
             public = body.get('publicKey', '').strip()
             if public:
                 valid_key(public)

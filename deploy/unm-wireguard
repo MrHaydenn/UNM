@@ -12,6 +12,7 @@ import sys
 import time
 
 CONFIG = Path('/etc/unm/wireguard.json')
+PANEL = Path('/etc/unm/config.json')
 BASE = Path('/var/lib/unm-wireguard')
 WG_DIR = Path('/etc/wireguard')
 
@@ -102,6 +103,25 @@ def write_config(path, text):
 
 
 def execute(cfg, request):
+    if request.get('action') == 'configure':
+        iface = cfg['interface']
+        if not re.fullmatch(r'[a-zA-Z0-9_-]{1,15}', iface): fail('Invalid configured interface')
+        path = WG_DIR / (iface + '.conf')
+        if path.is_symlink(): fail('Symlinked WireGuard configurations are not supported')
+        text = path.read_text(encoding='utf-8')
+        if re.search(r'(?im)^\s*SaveConfig\s*=\s*true\s*(?:#.*)?$', text): fail('Set SaveConfig = false before enabling provisioning')
+        panel = json.loads(PANEL.read_text())
+        subnet = ipaddress.ip_network(panel['wireguard_subnet'])
+        addresses = json.loads(command(['/usr/sbin/ip','-j','-4','address','show','dev',iface]))
+        choices = [ipaddress.ip_interface(str(a['local'])+'/'+str(a['prefixlen'])) for row in addresses for a in row.get('addr_info',[]) if a.get('family','inet')=='inet']
+        server = next((a for a in choices if a.network == subnet), None)
+        if server is None: fail('Live WireGuard interface does not match the panel tunnel subnet')
+        changed = dict(cfg, enabled=True, subnet=str(subnet), server_address=str(server), endpoint=request.get('endpoint',''))
+        status = live_status(changed)
+        if CONFIG.is_symlink(): fail('Symlinked provisioning settings are not supported')
+        write_config(BASE / ('settings-' + str(time.time_ns()) + '.json'), json.dumps(cfg,indent=2)+'\n')
+        write_config(CONFIG, json.dumps(changed,indent=2)+'\n')
+        return status
     if not cfg.get('enabled') and request.get('action') != 'monitor':
         fail('Peer provisioning is disabled. Configure /etc/unm/wireguard.json on the VPS first.')
     iface = cfg['interface']

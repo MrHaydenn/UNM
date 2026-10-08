@@ -1,0 +1,10 @@
+[Unit]
+Description=Update UNM from latest GitHub main push
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/sleep 2
+ExecStart=/usr/bin/bash /opt/unm/deploy/update.sh
+TimeoutStartSec=900
+UMask=0077

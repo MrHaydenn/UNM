@@ -42,13 +42,13 @@ class Services:
         if self.cfg['mode']!='live':
             return
         if kind=='web':
-            hosts={h['id']:h['address'] for h in self.hosts()}
+            hosts={**{h['id']:h['address'] for h in self.hosts()}, '@vps':'127.0.0.1'}
             items=[dict(r,address=hosts[r['hostId']]) for r in items]
         self.service_call(dict(action=kind,items=items))
 
     def save_proxy(self, body, actor):
         rid=valid_id(body.get('id') or 'site-'+secrets.token_hex(8))
-        hosts={h['id']:h['address'] for h in self.hosts()}
+        hosts={**{h['id']:h['address'] for h in self.hosts()}, '@vps':'127.0.0.1'}
         if body.get('hostId') not in hosts:
             raise ValueError('Select a registered WireGuard host')
         item=proxy(dict(body,address=hosts[body['hostId']]),self.cfg['wireguard_subnet'])

@@ -24,7 +24,7 @@ def proxy(body, subnet):
     if any('.' not in n or n.endswith(('.localhost','.local','.internal','.home.arpa')) for n in names):
         raise ValueError('Use public domain names for websites')
     address = ipaddress.ip_address(body.get('address', ''))
-    if address.version != 4 or address not in ipaddress.ip_network(subnet):
+    if not (body.get('hostId') == '@vps' and str(address) == '127.0.0.1') and (address.version != 4 or address not in ipaddress.ip_network(subnet)):
         raise ValueError('Website destination must be in the WireGuard subnet')
     port = body.get('port')
     if type(port) is not int or not 1 <= port <= 65535:
@@ -33,7 +33,7 @@ def proxy(body, subnet):
         raise ValueError('Choose HTTP or HTTPS for the destination')
     if type(body.get('ssl')) is not bool or type(body.get('enabled')) is not bool:
         raise ValueError('SSL and enabled must be true or false')
-    return dict(domains=names,address=str(address),port=port,scheme=body['scheme'],ssl=body['ssl'],enabled=body['enabled'])
+    return dict(domains=names,address=str(address),port=port,scheme=body['scheme'],ssl=body['ssl'],enabled=body['enabled'], **({'hostId':'@vps'} if body.get('hostId')=='@vps' else {}))
 
 
 def record(body, zones):

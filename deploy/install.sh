@@ -62,6 +62,8 @@ Path('/etc/unm/wireguard.json').write_text(json.dumps(settings,indent=2)+'\n')
 PY
 fi
 chmod 600 /etc/unm/wireguard.json
+install -m 755 -o root -g root /opt/unm/deploy/unm-update /usr/local/sbin/unm-update
+install -m 644 -o root -g root /opt/unm/deploy/unm-update.service /etc/systemd/system/unm-update.service
 install -m 755 -o root -g root /opt/unm/deploy/unm-firewall /usr/local/sbin/unm-firewall
 install -m 755 -o root -g root /opt/unm/deploy/unm-wireguard /usr/local/sbin/unm-wireguard
 install -m 755 -o root -g root /opt/unm/deploy/unm-services /usr/local/sbin/unm-services
@@ -76,7 +78,7 @@ Path('/etc/unm/services.json').write_text(json.dumps(settings,indent=2)+'\n')
 PY
 fi
 chmod 600 /etc/unm/services.json
-printf 'unm ALL=(root) NOPASSWD: /usr/local/sbin/unm-firewall "", /usr/local/sbin/unm-wireguard "", /usr/local/sbin/unm-services ""\n' >/etc/sudoers.d/unm
+printf 'unm ALL=(root) NOPASSWD: /usr/local/sbin/unm-firewall "", /usr/local/sbin/unm-wireguard "", /usr/local/sbin/unm-services "", /usr/local/sbin/unm-update ""\n' >/etc/sudoers.d/unm
 chmod 440 /etc/sudoers.d/unm
 visudo -cf /etc/sudoers.d/unm
 install -m 644 /opt/unm/deploy/unm.service /etc/systemd/system/unm.service

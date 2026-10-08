@@ -1,0 +1,20 @@
+#!/usr/bin/python3 -I
+"""Fixed, root-owned interface to the update service. No shell or user-supplied command."""
+import json
+import os
+import subprocess
+import sys
+try:
+    if os.geteuid()!=0: raise ValueError('Root required')
+    body=json.loads(sys.stdin.read(4096))
+    action=body.get('action')
+    if action not in ('status','start'): raise ValueError('Unknown action')
+    if action=='start':
+        subprocess.run(['/usr/bin/systemctl','start','--no-block','unm-update.service'],check=True,capture_output=True,timeout=10)
+    result=subprocess.run(['/usr/bin/systemctl','show','unm-update.service','--property=ActiveState,Result,ExecMainStatus'],check=True,capture_output=True,text=True,timeout=10)
+    fields=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
+    revision=subprocess.run(['/usr/bin/git','-C','/opt/unm','rev-parse','--short','HEAD'],capture_output=True,text=True,timeout=5).stdout.strip()
+    print(json.dumps(dict(active=fields.get('ActiveState') in ('activating','active'),result=fields.get('Result',''),exitCode=fields.get('ExecMainStatus',''),revision=revision)))
+except Exception:
+    print('UNM: Update service unavailable; inspect journalctl -u unm-update',file=sys.stderr)
+    sys.exit(1)

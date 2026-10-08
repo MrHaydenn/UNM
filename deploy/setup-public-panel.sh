@@ -37,7 +37,7 @@ services['public_panel']={'domain':'unm.mrhaydenn.us','port':8787,'backend_port'
 services['web_enabled']=True
 services['staging']=False
 with sqlite3.connect(str(Path(config['data_dir'])/'unm.sqlite')) as db:
-    hosts=dict(db.execute('SELECT id,address FROM hosts'))
+    hosts={**dict(db.execute('SELECT id,address FROM hosts')), '@vps':'127.0.0.1'}
     items=[json.loads(row[0]) for row in db.execute('SELECT body FROM proxy_hosts')]
 items=[dict(item,address=hosts[item['hostId']]) for item in items]
 text=helper.web_text(services,items)

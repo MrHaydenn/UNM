@@ -82,6 +82,23 @@ class WireGuardHelperTests(unittest.TestCase):
         self.execute(dict(action='remove', id='unmanaged-host'))
         self.assertEqual(self.runtime, {public(1): '10.8.0.2/32'})
 
+    def test_enable_provisioning_matches_live_network_and_preserves_tunnels(self):
+        self.helper.CONFIG = Path(self.tmp.name)/'settings.json'
+        self.helper.PANEL = Path(self.tmp.name)/'panel.json'
+        self.helper.PANEL.write_text('{"wireguard_subnet":"10.8.0.0/24"}')
+        disabled = dict(self.cfg,enabled=False,subnet='10.7.0.0/24',server_address='10.7.0.1/24')
+        self.helper.CONFIG.write_text(json.dumps(disabled))
+        with patch.object(self.helper,'command',side_effect=self.fake_command):
+            result=self.helper.execute(disabled,{'action':'configure','endpoint':'vps.example.com:51820'})
+        saved=json.loads(self.helper.CONFIG.read_text())
+        self.assertTrue(saved['enabled'])
+        self.assertEqual(saved['subnet'],'10.8.0.0/24')
+        self.assertEqual(self.path.read_text(),self.original)
+        self.assertEqual(self.runtime,{public(1):'10.8.0.2/32'})
+        self.helper.PANEL.write_text('{"wireguard_subnet":"10.9.0.0/24"}')
+        with patch.object(self.helper,'command',side_effect=self.fake_command), self.assertRaises(ValueError):
+            self.helper.execute(saved,{'action':'configure','endpoint':'vps.example.com:51820'})
+
     def test_address_collision_key_collision_and_bounds(self):
         for address, pub in [('10.8.0.2', public(2)), ('10.8.0.3', public(1)), ('127.0.0.1', public(2)), ('10.8.0.1', public(2))]:
             with self.assertRaises(ValueError):
