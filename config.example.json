@@ -7,10 +7,10 @@
   "mode": "preview",
   "wireguard_subnet": "10.8.0.0/24",
   "public_ip": "",
-  "dns_suffix": "games.example.com",
+  "dns_suffix": "hosts.example.com",
   "cloudflare_zone_id": "",
-  "port_min": 25565,
-  "port_max": 25600,
+  "port_min": 20000,
+  "port_max": 20099,
   "firewall_zone": "public",
   "max_connections": 256
 }

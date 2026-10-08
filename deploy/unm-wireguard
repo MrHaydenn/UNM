@@ -1,0 +1,203 @@
+#!/usr/bin/python3 -I
+"""Root helper that manages individual peers without replacing existing tunnels."""
+import base64
+import fcntl
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+
+CONFIG = Path('/etc/unm/wireguard.json')
+BASE = Path('/var/lib/unm-wireguard')
+WG_DIR = Path('/etc/wireguard')
+
+
+def fail(message):
+    raise ValueError('UNM: ' + message)
+
+
+def command(args):
+    result = subprocess.run(args, text=True, capture_output=True, timeout=10)
+    if result.returncode:
+        fail('WireGuard command failed; check interface and configuration on the VPS')
+    return result.stdout.strip()
+
+
+def key(value):
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except Exception:
+        fail('Invalid public key')
+    if len(raw) != 32 or raw == bytes(32) or base64.b64encode(raw).decode() != value:
+        fail('Invalid public key')
+    return value
+
+
+def parse_peers(text):
+    peers = []
+    for block in re.split(r'(?m)^\s*\[Peer\]\s*$', text)[1:]:
+        fields = {}
+        for line in block.splitlines():
+            line = line.split('#', 1)[0].strip()
+            if '=' in line:
+                name, value = line.split('=', 1)
+                fields[name.strip().lower()] = value.strip()
+        public = fields.get('publickey', '')
+        if public:
+            peers.append(dict(publicKey=public, allowedIPs=[v.strip() for v in fields.get('allowedips', '').split(',') if v.strip()]))
+    return peers
+
+
+def owned_block(text, hid):
+    pattern = r'(?m)^# BEGIN UNM HOST ' + re.escape(hid) + r'\n[\s\S]*?^# END UNM HOST ' + re.escape(hid) + r'\n?'
+    blocks = list(re.finditer(pattern, text))
+    if len(blocks) > 1:
+        fail('Duplicate managed host markers; inspect WireGuard configuration')
+    return blocks[0] if blocks else None
+
+
+def live_status(cfg):
+    iface = cfg['interface']
+    server = ipaddress.ip_interface(cfg['server_address'])
+    subnet = ipaddress.ip_network(cfg['subnet'])
+    if server.version != 4 or server.network != subnet:
+        fail('Server address must use the configured IPv4 subnet prefix')
+    addresses = json.loads(command(['/usr/sbin/ip', '-j', '-4', 'address', 'show', 'dev', iface]))
+    if not any(a.get('local') == str(server.ip) and a.get('prefixlen') == server.network.prefixlen
+               for entry in addresses for a in entry.get('addr_info', [])):
+        fail('Configured server address/subnet does not match the live WireGuard interface')
+    public = key(command(['/usr/bin/wg', 'show', iface, 'public-key']))
+    port = int(command(['/usr/bin/wg', 'show', iface, 'listen-port']))
+    if not 1 <= port <= 65535:
+        fail('WireGuard interface needs a UDP listen port')
+    endpoint = cfg['endpoint']
+    if not re.fullmatch(r'[A-Za-z0-9.-]+:[0-9]{1,5}', endpoint) or int(endpoint.rsplit(':', 1)[1]) != port:
+        fail('Endpoint must be an IPv4 address or hostname with the live listen port')
+    peers = []
+    for line in command(['/usr/bin/wg', 'show', iface, 'allowed-ips']).splitlines():
+        pub, allowed = line.split('\t', 1)
+        peers.append(dict(publicKey=pub, allowedIPs=[] if allowed == '(none)' else re.split(r'[,\s]+', allowed.strip())))
+    handshakes = dict(line.split('\t', 1) for line in command(['/usr/bin/wg', 'show', iface, 'latest-handshakes']).splitlines())
+    for peer in peers:
+        peer['lastHandshake'] = int(handshakes.get(peer['publicKey'], 0))
+    return dict(interface=iface, serverAddress=str(server), publicKey=public, endpoint=endpoint, peers=peers)
+
+
+def write_config(path, text):
+    temporary = path.with_suffix('.unm.tmp')
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(path)
+
+
+def execute(cfg, request):
+    if not cfg.get('enabled'):
+        fail('Peer provisioning is disabled. Configure /etc/unm/wireguard.json on the VPS first.')
+    iface = cfg['interface']
+    if not re.fullmatch(r'[a-zA-Z0-9_-]{1,15}', iface):
+        fail('Invalid configured interface name')
+    path = WG_DIR / (iface + '.conf')
+    if path.is_symlink():
+        fail('Symlinked WireGuard configurations are not supported')
+    text = path.read_text(encoding='utf-8')
+    if re.search(r'(?im)^\s*SaveConfig\s*=\s*true\s*(?:#.*)?$', text):
+        fail('Set SaveConfig = false before using peer provisioning')
+    status = live_status(cfg)
+    # Include persistent peers when allocating an address, even if temporarily absent at runtime.
+    persistent = parse_peers(text)
+    merged = {p['publicKey']: dict(p, lastHandshake=0) for p in persistent}
+    for peer in status['peers']:
+        old = merged.get(peer['publicKey'])
+        if old:
+            peer['allowedIPs'] = sorted(set(peer['allowedIPs']) | set(old['allowedIPs']))
+        merged[peer['publicKey']] = peer
+    status['peers'] = list(merged.values())
+    action = request.get('action')
+    if action == 'status':
+        return status
+    hid = request.get('id')
+    if not isinstance(hid, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,47}', hid):
+        fail('Invalid host ID')
+    block = owned_block(text, hid)
+    if action == 'add':
+        if block:
+            fail('Managed host already exists; remove it before replacing it')
+        pub = key(request.get('publicKey', ''))
+        address = ipaddress.IPv4Address(request['address'])
+        subnet = ipaddress.ip_network(cfg['subnet'])
+        if address not in subnet or address in (subnet.network_address, subnet.broadcast_address, ipaddress.ip_interface(cfg['server_address']).ip):
+            fail('Tunnel address is outside the allowed host pool')
+        for peer in status['peers']:
+            if pub == peer['publicKey']:
+                fail('Public key belongs to an existing peer; use register-existing-host instead')
+            for cidr in peer['allowedIPs']:
+                net = ipaddress.ip_network(cidr, strict=False)
+                if net.version == 4 and address in net:
+                    fail('Tunnel address overlaps an existing peer')
+        route = json.loads(command(['/usr/sbin/ip', '-j', 'route', 'get', str(address)]))
+        if not route or route[0].get('dev') != iface:
+            fail('The host address is not routed through the configured WireGuard interface')
+        changed = text.rstrip() + '\n\n# BEGIN UNM HOST ' + hid + '\n[Peer]\nPublicKey = ' + pub + '\nAllowedIPs = ' + str(address) + '/32\n# END UNM HOST ' + hid + '\n'
+        apply = ['/usr/bin/wg', 'set', iface, 'peer', pub, 'allowed-ips', str(address) + '/32']
+        rollback = ['/usr/bin/wg', 'set', iface, 'peer', pub, 'remove']
+    elif action == 'remove':
+        if not block:
+            return {'ok': True}  # Idempotent removal never touches unowned peers.
+        owned = parse_peers(block.group())
+        if len(owned) != 1:
+            fail('Invalid managed peer block')
+        pub = key(owned[0]['publicKey'])
+        allowed = owned[0]['allowedIPs']
+        if len(allowed) != 1 or ipaddress.ip_network(allowed[0]).prefixlen != 32:
+            fail('Managed peers must have a single /32 tunnel address')
+        changed = text[:block.start()] + text[block.end():]
+        apply = ['/usr/bin/wg', 'set', iface, 'peer', pub, 'remove']
+        rollback = ['/usr/bin/wg', 'set', iface, 'peer', pub, 'allowed-ips', allowed[0]]
+    else:
+        fail('Unknown action')
+    backup = BASE / (iface + '-' + str(time.time_ns()) + '.conf')
+    descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+        stream.write(text)
+    try:
+        write_config(path, changed)
+        command(apply)
+    except Exception:
+        write_config(path, text)
+        try:
+            command(rollback)
+        except Exception:
+            fail('Peer change and runtime rollback failed; inspect WireGuard via SSH')
+        raise
+    return {'ok': True}
+
+
+def main():
+    try:
+        if os.geteuid() != 0:
+            fail('Root required')
+        cfg = json.loads(CONFIG.read_text())
+        request = json.loads(sys.stdin.read(4096))
+        if not isinstance(request, dict):
+            fail('Invalid request')
+        with (BASE / 'lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = execute(cfg, request)
+        print(json.dumps(result))
+    except ValueError as exc:
+        print(str(exc) if str(exc).startswith('UNM: ') else 'UNM: Invalid configuration or request', file=sys.stderr)
+        raise SystemExit(1)
+    except Exception:
+        print('UNM: WireGuard operation failed; inspect the configured interface and file', file=sys.stderr)
+        raise SystemExit(1)
+
+
+if __name__ == '__main__':
+    main()

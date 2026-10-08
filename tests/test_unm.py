@@ -1,4 +1,5 @@
 import asyncio
+import base64
 from concurrent.futures import ThreadPoolExecutor
 import importlib.machinery
 import importlib.util
@@ -8,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+import subprocess
 from unittest.mock import patch
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -26,7 +28,7 @@ class ControlTests(unittest.TestCase):
         self.config.write_text(json.dumps(cfg))
         self.app = unm.App(self.config)
         self.app.db.execute('INSERT INTO users(name,password) VALUES(?,?)', ('admin', unm.password_hash('strong-test-password')))
-        self.app.db.execute('INSERT INTO hosts VALUES(?,?)', ('pc', '10.8.0.2'))
+        self.app.db.execute('INSERT INTO hosts(id,address) VALUES(?,?)', ('pc', '10.8.0.2'))
         self.app.db.commit()
         self.http = unm.ThreadingHTTPServer(('127.0.0.1', 0), unm.Handler)
         self.http.app = self.app
@@ -71,7 +73,7 @@ class ControlTests(unittest.TestCase):
         self.csrf = state['csrf']
 
     def body(self, **kwargs):
-        return dict(hostId='pc', targetPort=25565, publicPort=25570, enabled=True, hostname='survival.games.example.com', **kwargs)
+        return dict(hostId='pc', targetPort=8080, publicPort=20080, enabled=True, hostname='media.hosts.example.com', **kwargs)
 
     def test_auth_csrf_and_session_logout(self):
         self.assertEqual(self.req('/api/state')[0], 403)
@@ -83,23 +85,61 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.req('/api/logout', 'POST', {})[0], 200)
         self.assertEqual(self.req('/api/state')[0], 403)
 
-    def test_scoped_api_idempotency_conflicts_expiry_revocation(self):
+    def test_forward_idempotency_conflicts_and_external_access_disabled(self):
         self.login()
-        code, token = self.req('/api/tokens', 'POST', dict(id='launcher', hosts=['pc'], servers=['survival'], portMin=25570, portMax=25571, days=1))
-        self.assertEqual(code, 201)
-        key = token['token']
-        route = '/api/v1/minecraft/servers/survival'
+        route = '/api/forwards/media'
         for _ in range(2):
-            self.assertEqual(self.req(route, 'PUT', self.body(), bearer=key)[0], 200)
+            self.assertEqual(self.req(route, 'PUT', self.body())[0], 200)
         self.assertEqual(len(self.app.servers()), 1)
-        self.assertEqual(self.req('/api/v1/minecraft/servers/other', 'PUT', self.body(), bearer=key)[0], 403)
-        outside = self.body(); outside['publicPort'] = 25572
-        self.assertEqual(self.req(route, 'PUT', outside, bearer=key)[0], 403)
-        self.assertEqual(self.req('/api/hosts', 'POST', {'id': 'hack', 'address': '10.8.0.4'}, bearer=key)[0], 403)
-        self.assertEqual(self.req('/api/v1/minecraft/servers/conflict', 'PUT', self.body())[0], 400)
-        self.assertEqual(self.req(route + '/dns', 'POST', {}, bearer=key)[0], 400)
-        self.assertEqual(self.req('/api/tokens/launcher', 'DELETE')[0], 200)
-        self.assertEqual(self.req(route, bearer=key)[0], 403)
+        self.assertEqual(self.req('/api/forwards/conflict', 'PUT', self.body())[0], 400)
+        self.assertEqual(self.req(route, bearer='retired-token')[0], 403)
+        self.assertEqual(self.req('/api/tokens', 'POST', {})[0], 404)
+        self.assertEqual(self.req(route + '/dns', 'POST', {})[0], 400)
+
+    def test_registered_host_and_firewall_lifecycle(self):
+        self.login()
+        status, body = self.req('/api/hosts', 'POST', dict(id='new-pc', address='10.8.0.3', enroll=False))
+        self.assertEqual(status, 201)
+        self.assertFalse(body['host']['managed'])
+        self.assertIsNone(body['configuration'])
+        self.assertEqual(self.req('/api/firewall', 'POST', dict(id='web', port=20090, enabled=True))[0], 200)
+        self.assertEqual(self.req('/api/firewall', 'POST', dict(id='ssh', port=22, enabled=True))[0], 400)
+        self.assertEqual(self.req('/api/state')[1]['firewallRules'][0]['port'], 20090)
+        self.assertEqual(self.req('/api/firewall/web', 'DELETE')[0], 200)
+        self.assertEqual(self.req('/api/hosts/new-pc', 'DELETE')[0], 200)
+        self.app.save_server('media', self.body(), 'admin')
+        self.assertEqual(self.req('/api/hosts/pc', 'DELETE')[0], 400)
+        self.assertEqual(self.req('/api/hosts', 'POST', dict(id='new-peer', address='', enroll=True))[0], 400)
+
+    def test_enrollment_allocation_and_private_key_is_not_persisted(self):
+        self.login()
+        private = base64.b64encode(bytes([4]) * 32).decode()
+        public = base64.b64encode(bytes([5]) * 32).decode()
+        status = dict(available=True, serverAddress='10.8.0.1/24', publicKey=base64.b64encode(bytes([9]) * 32).decode(),
+                      endpoint='vps.example.com:51820', peers=[])
+        with patch.object(self.app, 'wg_status', return_value=status), patch.object(self.app, 'wg_call', return_value={'ok': True}) as call, patch('networking.subprocess.run', side_effect=[subprocess.CompletedProcess([], 0, private), subprocess.CompletedProcess([], 0, public)]):
+            code, response = self.req('/api/hosts', 'POST', dict(id='new-peer', address='', enroll=True))
+            self.assertEqual(code, 201)
+            self.assertEqual(response['host']['address'], '10.8.0.3')
+            self.assertTrue(response['privateKeyIncluded'])
+            self.assertIn('PrivateKey = ' + private, response['configuration'])
+            self.assertIn('AllowedIPs = 10.8.0.0/24', response['configuration'])
+            self.assertNotIn('0.0.0.0/0', response['configuration'])
+            self.assertNotIn(private, repr([dict(r) for r in self.app.db.execute('SELECT * FROM hosts')]))
+            self.assertEqual(call.call_args.args[0]['action'], 'add')
+            code, config = self.req('/api/hosts/new-peer/configuration')
+            self.assertEqual(code, 200)
+            self.assertIn('<HOST_PRIVATE_KEY>', config['configuration'])
+            self.assertNotIn(private, config['configuration'])
+            self.assertEqual(self.req('/api/hosts/new-peer', 'DELETE')[0], 200)
+            self.assertEqual(call.call_args.args[0]['action'], 'remove')
+
+    def test_enrollment_failure_does_not_register_host(self):
+        status = dict(available=True, serverAddress='10.8.0.1/24', publicKey=base64.b64encode(bytes([9]) * 32).decode(), endpoint='vps.example.com:51820', peers=[])
+        with patch.object(self.app, 'wg_status', return_value=status), patch.object(self.app, 'wg_call', side_effect=ValueError('duplicate peer')):
+            with self.assertRaises(ValueError):
+                self.app.add_host(dict(id='new-peer', address='', enroll=True, publicKey=base64.b64encode(bytes([2]) * 32).decode()), 'admin')
+        self.assertNotIn('new-peer', [h['id'] for h in self.app.hosts()])
 
     def test_totp_known_vector_and_replay(self):
         secret = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'
@@ -111,30 +151,30 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.req('/api/login', 'POST', payload)[0], 401)
 
     def test_network_failure_does_not_save(self):
-        self.app.save_server('survival', self.body(), 'admin')
+        self.app.save_server('media', self.body(), 'admin')
         new = self.body(); new['targetPort'] = 25566
         with patch.object(self.app, 'apply', side_effect=[OSError('bind failure'), None]) as apply:
             with self.assertRaises(ValueError):
-                self.app.save_server('survival', new, 'admin')
+                self.app.save_server('media', new, 'admin')
         self.assertEqual(apply.call_count, 2)
-        self.assertEqual(self.app.servers()[0]['targetPort'], 25565)
+        self.assertEqual(self.app.servers()[0]['targetPort'], 8080)
 
     def test_dns_ownership_and_dns_only(self):
-        self.app.save_server('survival', self.body(), 'admin')
+        self.app.save_server('media', self.body(), 'admin')
         self.app.cfg['mode'] = 'live'
         self.app.cfg['public_ip'] = '203.0.113.5'
         with patch.object(self.app, 'cf', return_value=[{'id': 'foreign'}]):
             with self.assertRaises(ValueError):
-                self.app.dns('survival', False, 'admin', None)
+                self.app.dns('media', False, 'admin', None)
         with patch.object(self.app, 'cf', side_effect=[[], {'id': 'owned'}]) as cf:
-            item = self.app.dns('survival', False, 'admin', None)
+            item = self.app.dns('media', False, 'admin', None)
             self.assertFalse(cf.call_args.args[2]['proxied'])
             self.assertEqual(item['dnsRecordId'], 'owned')
-        renamed = self.body(); renamed['hostname'] = 'new.games.example.com'
+        renamed = self.body(); renamed['hostname'] = 'new.hosts.example.com'
         with self.assertRaises(ValueError):
-            self.app.validate_server('survival', renamed)
+            self.app.validate_server('media', renamed)
         with patch.object(self.app, 'cf', return_value={}):
-            self.assertIsNone(self.app.dns('survival', True, 'admin', None)['dnsRecordId'])
+            self.assertIsNone(self.app.dns('media', True, 'admin', None)['dnsRecordId'])
 
 
 class ProxyTests(unittest.TestCase):
@@ -158,7 +198,7 @@ class ProxyTests(unittest.TestCase):
             reserved.close(); await reserved.wait_closed()
             await proxy.reconcile([entry])
             reader, writer = await asyncio.open_connection('127.0.0.1', port)
-            payload = b'minecraft-data' * 10000
+            payload = b'network-data' * 10000
             writer.write(payload); await writer.drain()
             self.assertEqual(await asyncio.wait_for(reader.readexactly(len(payload)), 5), payload)
             writer.close(); await writer.wait_closed()

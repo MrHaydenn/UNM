@@ -21,6 +21,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, urlencode
 from urllib.request import Request, urlopen
+from networking import Networking
 
 ROOT = Path(__file__).resolve().parent
 LOCK = threading.RLock()
@@ -120,7 +121,7 @@ class Proxy:
         asyncio.run_coroutine_threadsafe(self.reconcile(entries), self.loop).result(20)
 
 
-class App:
+class App(Networking):
     def __init__(self, config):
         self.cfg = json.loads(Path(config).read_text())
         c = self.cfg
@@ -142,8 +143,16 @@ class App:
         CREATE TABLE IF NOT EXISTS hosts(id TEXT PRIMARY KEY, address TEXT UNIQUE NOT NULL);
         CREATE TABLE IF NOT EXISTS servers(id TEXT PRIMARY KEY, body TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS tokens(id TEXT PRIMARY KEY, hash TEXT NOT NULL, body TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS firewall_rules(id TEXT PRIMARY KEY, port INTEGER UNIQUE NOT NULL, enabled INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS audit(at INTEGER, actor TEXT, action TEXT, resource TEXT);
         ''')
+        columns = {r['name'] for r in self.db.execute('PRAGMA table_info(hosts)')}
+        if 'public_key' not in columns:
+            self.db.execute('ALTER TABLE hosts ADD COLUMN public_key TEXT')
+        if 'managed' not in columns:
+            self.db.execute('ALTER TABLE hosts ADD COLUMN managed INTEGER NOT NULL DEFAULT 0')
+        # External tokens are retired; existing forwarding entries remain intact.
+        self.db.execute('DELETE FROM tokens')
         self.db.commit()
         self.sessions, self.attempts, self.otp_used = {}, {}, {}
         self.proxy = Proxy(c) if c['mode'] == 'live' else None
@@ -153,7 +162,8 @@ class App:
         self.db.execute('DELETE FROM audit WHERE rowid NOT IN (SELECT rowid FROM audit ORDER BY rowid DESC LIMIT 2000)')
 
     def hosts(self):
-        return [dict(r) for r in self.db.execute('SELECT * FROM hosts ORDER BY id')]
+        return [dict(id=r['id'], address=r['address'], publicKey=r['public_key'], managed=bool(r['managed']))
+                for r in self.db.execute('SELECT * FROM hosts ORDER BY id')]
 
     def servers(self):
         return [json.loads(r['body']) for r in self.db.execute('SELECT body FROM servers ORDER BY id')]
@@ -162,9 +172,11 @@ class App:
         hosts = {h['id']: h['address'] for h in self.hosts()}
         return [dict(r, address=hosts[r['hostId']]) for r in entries]
 
-    def firewall(self, entries):
+    def firewall(self, entries, rules=None):
         if self.proxy:
-            ports = sorted(r['publicPort'] for r in entries if r['enabled'])
+            rules = self.firewall_rules() if rules is None else rules
+            ports = sorted({r['publicPort'] for r in entries if r['enabled']} |
+                           {r['port'] for r in rules if r['enabled']})
             subprocess.run(['sudo', '-n', '/usr/local/sbin/unm-firewall'], input=json.dumps(ports),
                            text=True, capture_output=True, check=True, timeout=30)
 
@@ -177,7 +189,7 @@ class App:
         valid_id(sid)
         host = body.get('hostId')
         if host not in {h['id'] for h in self.hosts()}:
-            raise ValueError('Unknown hostId; register this PC first.')
+            raise ValueError('Unknown hostId; register this host first.')
         for field in ('targetPort', 'publicPort'):
             if type(body.get(field)) is not int or not 1 <= body[field] <= 65535:
                 raise ValueError(field + ' must be an integer port')
@@ -191,12 +203,9 @@ class App:
         if hostname and (not hostname.endswith('.' + suffix) or len(hostname) > 253 or
                          any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', p) for p in hostname.split('.'))):
             raise ValueError('Hostname must be a valid name under ' + suffix)
-        if scope and (sid not in scope['servers'] or host not in scope['hosts'] or
-                      not scope['portMin'] <= port <= scope['portMax']):
-            raise PermissionError('Token does not permit this server, host or public port')
         for r in self.servers():
             if r['id'] != sid and (r['publicPort'] == port or (hostname and r['hostname'] == hostname)):
-                raise ValueError('Port or hostname already belongs to another server')
+                raise ValueError('Port or hostname already belongs to another forwarding route')
         old = next((r for r in self.servers() if r['id'] == sid), None)
         if old and old.get('dnsRecordId') and hostname != old['hostname']:
             raise ValueError('Remove the managed DNS record before changing its hostname')
@@ -217,7 +226,7 @@ class App:
                 LOG.exception('Rollback failed; administrator intervention required')
             raise ValueError('Network apply failed; check service logs. Configuration was not saved.')
         self.db.execute('INSERT OR REPLACE INTO servers VALUES(?,?)', (sid, json.dumps(item)))
-        self.audit(actor, 'server.save', sid)
+        self.audit(actor, 'forward.save', sid)
         self.db.commit()
         return item
 
@@ -238,7 +247,7 @@ class App:
     def dns(self, sid, remove, actor, scope):
         item = next((r for r in self.servers() if r['id'] == sid), None)
         if not item:
-            raise ValueError('Server not found')
+            raise ValueError('Forwarding route not found')
         self.validate_server(sid, item, scope)
         if self.cfg['mode'] != 'live':
             raise ValueError('DNS changes are disabled in preview mode')
@@ -303,15 +312,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def authenticate(self):
         app = self.app
-        bearer = self.headers.get('Authorization', '')
-        if bearer.startswith('Bearer '):
-            hashed = digest(bearer[7:])
-            for row in app.db.execute('SELECT * FROM tokens'):
-                if hmac.compare_digest(row['hash'], hashed):
-                    scope = json.loads(row['body'])
-                    if scope['expires'] <= time.time():
-                        break
-                    return 'token:' + row['id'], scope, None
+        if self.headers.get('Authorization'):
+            raise PermissionError('External tokens are disabled; sign in through the panel')
         cookies = SimpleCookie()
         cookies.load(self.headers.get('Cookie', ''))
         raw = cookies.get('unm_session')
@@ -372,84 +374,54 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {'ok': True}, cookie=self.cookie(token))
         actor, scope, session = self.authenticate()
         if path == '/api/state' and self.command == 'GET':
-            if scope:
-                raise PermissionError('Use the launcher API')
-            tokens = [dict(id=r['id'], **json.loads(r['body'])) for r in app.db.execute('SELECT * FROM tokens')]
-            return self.send(200, dict(user=actor, csrf=session['csrf'], hosts=app.hosts(), servers=app.servers(), tokens=tokens,
+            return self.send(200, dict(user=actor, csrf=session['csrf'], hosts=app.hosts(), forwards=app.servers(),
+                                      firewallRules=app.firewall_rules(), wireguard=app.wg_status(),
                                       mode=app.cfg['mode'], portMin=app.cfg['port_min'], portMax=app.cfg['port_max'],
-                                      dnsSuffix=app.cfg['dns_suffix'], audit=[dict(r) for r in app.db.execute('SELECT * FROM audit ORDER BY rowid DESC LIMIT 40')]))
+                                      subnet=app.cfg['wireguard_subnet'], dnsSuffix=app.cfg['dns_suffix'],
+                                      audit=[dict(r) for r in app.db.execute('SELECT * FROM audit ORDER BY rowid DESC LIMIT 40')]))
         if path == '/api/logout' and self.command == 'POST' and session:
             app.sessions = {k: v for k, v in app.sessions.items() if v is not session}
             return self.send(200, {'ok': True}, cookie=self.cookie('', 0))
         if path == '/api/hosts' and self.command == 'POST':
-            if scope:
-                raise PermissionError('Admin only')
-            body = self.read_body()
-            hid = valid_id(body.get('id'))
-            address = ipaddress.ip_address(body['address'])
-            if address.version != 4 or address not in ipaddress.ip_network(app.cfg['wireguard_subnet']):
-                raise ValueError('Host must be an IPv4 address inside your WireGuard subnet')
-            if any(r['hostId'] == hid for r in app.servers()):
-                raise ValueError('Disable and delete this host’s servers before changing its address')
-            app.db.execute('INSERT OR REPLACE INTO hosts VALUES(?,?)', (hid, str(address)))
-            app.audit(actor, 'host.save', hid)
-            app.db.commit()
-            return self.send(200, {'ok': True})
-        if path == '/api/tokens' and self.command == 'POST':
-            if scope:
-                raise PermissionError('Admin only')
-            body = self.read_body()
-            tid = valid_id(body['id'])
-            hosts, servers = body.get('hosts'), body.get('servers')
-            if not isinstance(hosts, list) or not hosts or not set(hosts) <= {h['id'] for h in app.hosts()}:
-                raise ValueError('Choose registered hosts')
-            if not isinstance(servers, list) or not servers or len(servers) > 100:
-                raise ValueError('Specify server IDs')
-            for sid in servers:
-                valid_id(sid)
-            low, high = body.get('portMin'), body.get('portMax')
-            days = body.get('days', 30)
-            if type(low) is not int or type(high) is not int or not app.cfg['port_min'] <= low <= high <= app.cfg['port_max']:
-                raise ValueError('Invalid token port range')
-            if type(days) is not int or not 1 <= days <= 365:
-                raise ValueError('Expiry must be 1–365 days')
-            secret = secrets.token_urlsafe(40)
-            record = dict(hosts=hosts, servers=servers, portMin=low, portMax=high, expires=int(time.time()) + days * 86400)
-            app.db.execute('INSERT OR REPLACE INTO tokens VALUES(?,?,?)', (tid, digest(secret), json.dumps(record)))
-            app.audit(actor, 'token.create', tid)
-            app.db.commit()
-            return self.send(201, {'token': secret, 'id': tid})
+            return self.send(201, app.add_host(self.read_body(), actor))
         parts = path.strip('/').split('/')
-        if len(parts) == 3 and parts[:2] == ['api', 'tokens'] and self.command == 'DELETE':
-            if scope:
-                raise PermissionError('Admin only')
-            app.db.execute('DELETE FROM tokens WHERE id=?', (parts[2],))
-            app.audit(actor, 'token.revoke', parts[2])
-            app.db.commit()
+        if len(parts) >= 3 and parts[:2] == ['api', 'hosts']:
+            hid = valid_id(parts[2])
+            if len(parts) == 3 and self.command == 'DELETE':
+                app.remove_host(hid, actor)
+                return self.send(200, {'ok': True})
+            if len(parts) == 4 and parts[3] == 'configuration' and self.command == 'GET':
+                host = next((h for h in app.hosts() if h['id'] == hid), None)
+                if not host or not host['managed']:
+                    raise ValueError('Configuration is available for managed hosts only')
+                return self.send(200, dict(configuration=app.host_config(host, app.wg_status()), privateKeyIncluded=False))
+        if path == '/api/firewall' and self.command == 'POST':
+            app.save_firewall_rule(self.read_body(), actor)
             return self.send(200, {'ok': True})
-        prefix = '/api/v1/minecraft/servers/'
+        if len(parts) == 3 and parts[:2] == ['api', 'firewall'] and self.command == 'DELETE':
+            app.delete_firewall_rule(valid_id(parts[2]), actor)
+            return self.send(200, {'ok': True})
+        prefix = '/api/forwards/'
         if path.startswith(prefix):
             rest = path[len(prefix):].split('/')
             sid = valid_id(rest[0])
             item = next((r for r in app.servers() if r['id'] == sid), None)
-            if scope and (sid not in scope['servers'] or (item and (item['hostId'] not in scope['hosts'] or not scope['portMin'] <= item['publicPort'] <= scope['portMax']))):
-                raise PermissionError('Server outside token scope')
             if len(rest) == 2 and rest[1] == 'dns' and self.command in ('POST', 'DELETE'):
                 return self.send(200, app.dns(sid, self.command == 'DELETE', actor, scope))
             if len(rest) != 1:
                 return self.send(404, {'error': 'Route not found'})
             if self.command == 'GET':
-                return self.send(200 if item else 404, item or {'error': 'Server not found'})
+                return self.send(200 if item else 404, item or {'error': 'Forwarding route not found'})
             if self.command == 'PUT':
                 return self.send(200, app.save_server(sid, self.read_body(), actor, scope))
             if self.command == 'DELETE':
                 if not item:
                     return self.send(200, {'ok': True})
                 if item.get('dnsRecordId'):
-                    raise ValueError('Remove this server’s managed DNS record first')
+                    raise ValueError('Remove this route’s managed DNS record first')
                 app.save_server(sid, dict(item, enabled=False), actor, scope)
                 app.db.execute('DELETE FROM servers WHERE id=?', (sid,))
-                app.audit(actor, 'server.delete', sid)
+                app.audit(actor, 'forward.delete', sid)
                 app.db.commit()
                 return self.send(200, {'ok': True})
         self.send(404, {'error': 'Route not found'})
@@ -503,7 +475,7 @@ def main():
     if args.command == 'check':
         for entry in app.servers():
             app.validate_server(entry['id'], entry)
-        print('Configuration and stored servers validated; no rules applied.')
+        print('Configuration and stored forwarding routes validated; no rules applied.')
         return
     if not app.db.execute('SELECT 1 FROM users LIMIT 1').fetchone():
         raise SystemExit('Create an admin before starting the service')

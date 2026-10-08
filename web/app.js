@@ -1,46 +1,100 @@
 'use strict';
-let state, csrf = '';
+let state, csrf = '', configurationName = '';
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const endpoint = id => '/api/v1/minecraft/servers/' + encodeURIComponent(id);
+const endpoint = id => '/api/forwards/' + encodeURIComponent(id);
 function notice(message='') { $('notice').textContent = message; }
-async function api(path, method='GET', body) {
+async function request(path, method='GET', body) {
   const response = await fetch(path, {method, headers:{'Content-Type':'application/json','X-CSRF-Token':csrf}, body:body === undefined ? undefined : JSON.stringify(body)});
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'Request failed');
   return data;
 }
 async function attempt(fn) { try { notice(); await fn(); } catch(error) { notice(error.message); } }
+function badge(enabled) { return '<span class="badge '+(enabled?'':'off')+'">'+(enabled?'Enabled':'Disabled')+'</span>'; }
+function empty(message) { return '<div class="empty">'+message+'</div>'; }
 async function refresh() {
-  state = await api('/api/state'); csrf = state.csrf;
+  state = await request('/api/state'); csrf = state.csrf;
   $('login').hidden=true; $('dashboard').hidden=false; $('logout').hidden=false;
   $('mode').textContent=state.mode === 'preview' ? 'Preview · no network changes' : 'Live';
-  $('subtitle').textContent=`Reserved public ports ${state.portMin}–${state.portMax} · DNS under ${state.dnsSuffix}`;
-  $('stats').innerHTML = [[state.hosts.length,'Registered PCs'],[state.servers.filter(s=>s.enabled).length,'Enabled routes'],[state.tokens.length,'API tokens']].map(([n,label])=>`<div class="stat"><b>${n}</b><span>${label}</span></div>`).join('');
-  $('server-list').innerHTML=state.servers.map(s=>`<article class="card"><div><h3>${esc(s.id)} <span class="badge ${s.enabled?'':'off'}">${s.enabled?'Enabled':'Disabled'}</span></h3><p>VPS :${s.publicPort} → ${esc(s.hostId)} :${s.targetPort}</p><p>${esc(s.hostname || 'No hostname')} · DNS: ${esc(s.dnsStatus)}</p></div><div class="actions"><button data-action="edit" data-id="${esc(s.id)}">Edit</button><button data-action="toggle" data-id="${esc(s.id)}">${s.enabled?'Disable':'Enable'}</button><button data-action="dns" data-id="${esc(s.id)}">Sync DNS</button>${s.dnsRecordId?`<button data-action="undns" data-id="${esc(s.id)}">Remove DNS</button>`:''}<button data-action="delete" data-id="${esc(s.id)}">Delete</button></div></article>`).join('') || '<div class="empty">No server routes yet. Register a PC, then add your first server.</div>';
-  $('host-list').innerHTML=state.hosts.map(h=>`<article class="card"><div><h3>${esc(h.id)}</h3><p>${esc(h.address)}</p></div><span class="badge">Registered</span></article>`).join('') || '<div class="empty">Add a PC using its existing WireGuard address.</div>';
-  $('token-list').innerHTML=state.tokens.map(t=>`<article class="card"><div><h3>${esc(t.id)}</h3><p>Servers: ${esc(t.servers.join(', '))} · Ports: ${t.portMin}–${t.portMax}</p><p>Expires ${esc(new Date(t.expires*1000).toLocaleString())}</p></div><button data-revoke="${esc(t.id)}">Revoke</button></article>`).join('') || '<div class="empty">No launcher tokens yet.</div>';
-  $('audit-list').innerHTML='<table><thead><tr><th>Time</th><th>Account</th><th>Change</th><th>Resource</th></tr></thead><tbody>'+state.audit.map(a=>`<tr><td>${esc(new Date(a.at*1000).toLocaleString())}</td><td>${esc(a.actor)}</td><td>${esc(a.action)}</td><td>${esc(a.resource)}</td></tr>`).join('')+'</tbody></table>';
-  const f=$('token-form'); for(const name of ['portMin','portMax']) if(!f.elements[name].value) f.elements[name].value=state[name];
+  $('subtitle').textContent='Tunnel network '+state.subnet+' · Managed public ports '+state.portMin+'–'+state.portMax;
+  const open = new Set([...state.forwards.filter(f=>f.enabled).map(f=>f.publicPort), ...state.firewallRules.filter(r=>r.enabled).map(r=>r.port)]);
+  $('stats').innerHTML = [[state.hosts.length,'WireGuard hosts'],[state.forwards.filter(f=>f.enabled).length,'Active forwards'],[open.size,'Allowed TCP ports']].map(([n,label])=>'<div class="stat"><b>'+n+'</b><span>'+label+'</span></div>').join('');
+  $('forward-list').innerHTML=state.forwards.map(f=>{
+    const button=(action,label)=>'<button data-action="'+action+'" data-id="'+esc(f.id)+'">'+label+'</button>';
+    return '<article class="card"><div><h3>'+esc(f.id)+' '+badge(f.enabled)+'</h3><p>TCP · VPS :'+f.publicPort+' → '+esc(f.hostId)+' :'+f.targetPort+'</p>'+(f.hostname?'<p>'+esc(f.hostname)+' · DNS: '+esc(f.dnsStatus)+'</p>':'')+'</div><div class="actions">'+button('edit','Edit')+button('toggle',f.enabled?'Disable':'Enable')+(f.hostname?button('dns','Sync DNS'):'')+(f.dnsRecordId?button('undns','Remove DNS'):'')+button('delete','Delete')+'</div></article>';
+  }).join('') || empty('Add a host, then create your first forwarding rule.');
+  const wg=state.wireguard;
+  $('wg-status').textContent=wg.available?wg.interface+' · VPS tunnel '+wg.serverAddress+' · Endpoint '+wg.endpoint:wg.message;
+  $('host-list').innerHTML=state.hosts.map(h=>{
+    const peer=(wg.peers||[]).find(p=>p.publicKey===h.publicKey);
+    const status=peer?.lastHandshake?'Last handshake '+new Date(peer.lastHandshake*1000).toLocaleString():(h.managed?'Waiting for first handshake':'Existing tunnel');
+    return '<article class="card"><div><h3>'+esc(h.id)+' <span class="badge">'+(h.managed?'Managed peer':'Registered host')+'</span></h3><p>'+esc(h.address)+' · '+esc(status)+'</p></div><div class="actions">'+(h.managed?'<button data-host-action="configuration" data-id="'+esc(h.id)+'">Host setup</button>':'')+'<button data-host-action="delete" data-id="'+esc(h.id)+'">Remove</button></div></article>';
+  }).join('') || empty('Register an existing host or create a new WireGuard peer.');
+  $('firewall-list').innerHTML=[
+    ...state.forwards.filter(f=>f.enabled).map(f=>'<article class="card"><div><h3>TCP '+f.publicPort+'</h3><p>Opened by forwarding rule '+esc(f.id)+'</p></div><span class="badge">Automatic</span></article>'),
+    ...state.firewallRules.map(r=>'<article class="card"><div><h3>'+esc(r.id)+' '+badge(r.enabled)+'</h3><p>TCP '+r.port+'</p></div><div class="actions"><button data-firewall-action="toggle" data-id="'+esc(r.id)+'">'+(r.enabled?'Disable':'Enable')+'</button><button data-firewall-action="delete" data-id="'+esc(r.id)+'">Remove</button></div></article>')
+  ].join('') || empty('No managed port allowances yet.');
+  $('audit-list').innerHTML='<table><thead><tr><th>Time</th><th>Account</th><th>Change</th><th>Resource</th></tr></thead><tbody>'+state.audit.map(a=>'<tr><td>'+esc(new Date(a.at*1000).toLocaleString())+'</td><td>'+esc(a.actor)+'</td><td>'+esc(a.action)+'</td><td>'+esc(a.resource)+'</td></tr>').join('')+'</tbody></table>';
 }
-$('login-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{await api('/api/login','POST',Object.fromEntries(new FormData(e.target)));e.target.reset();await refresh();});};
-$('logout').onclick=()=>attempt(async()=>{await api('/api/logout','POST',{});location.reload();});
+$('login-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{await request('/api/login','POST',Object.fromEntries(new FormData(e.target)));e.target.reset();await refresh();});};
+$('logout').onclick=()=>attempt(async()=>{await request('/api/logout','POST',{});clearConfiguration();location.reload();});
+$('refresh').onclick=()=>attempt(refresh);
 document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{document.querySelectorAll('.tab').forEach(tab=>tab.hidden=tab.id!==button.dataset.tab);document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('selected',b===button));notice();});
-function edit(server) {
-  const f=$('server-form'); f.reset(); f.hidden=false;
-  f.elements.hostId.innerHTML=state.hosts.map(h=>`<option value="${esc(h.id)}">${esc(h.id)} · ${esc(h.address)}</option>`).join('');
+function edit(rule) {
+  const f=$('forward-form'); f.reset(); f.hidden=false;
+  f.elements.hostId.innerHTML=state.hosts.map(h=>'<option value="'+esc(h.id)+'">'+esc(h.id)+' · '+esc(h.address)+'</option>').join('');
   f.elements.publicPort.min=state.portMin; f.elements.publicPort.max=state.portMax;
   f.elements.publicPort.value=state.portMin;
-  f.elements.hostname.placeholder='survival.'+state.dnsSuffix;
-  f.elements.id.readOnly=Boolean(server);
-  if(server) for(const [key,value] of Object.entries(server)) if(f.elements[key]) {if(key==='enabled') f.elements[key].checked=value;else f.elements[key].value=value;}
+  f.elements.hostname.placeholder='media.'+state.dnsSuffix;
+  f.elements.id.readOnly=Boolean(rule);
+  if(rule) for(const [key,value] of Object.entries(rule)) if(f.elements[key]) {if(key==='enabled') f.elements[key].checked=value;else f.elements[key].value=value;}
   f.scrollIntoView({behavior:'smooth',block:'center'});
 }
-$('new-server').onclick=()=>edit(); $('cancel-server').onclick=()=>$('server-form').hidden=true;
-$('server-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{const f=e.target;const b=Object.fromEntries(new FormData(f));b.targetPort=Number(b.targetPort);b.publicPort=Number(b.publicPort);b.enabled=f.elements.enabled.checked;await api(endpoint(b.id),'PUT',b);f.hidden=true;await refresh();});};
-$('server-list').onclick=e=>attempt(async()=>{const button=e.target.closest('[data-action]');if(!button)return;const s=state.servers.find(s=>s.id===button.dataset.id);const action=button.dataset.action;if(action==='edit')return edit(s);if(['delete','undns'].includes(action)&&!confirm(`Confirm ${action==='delete'?'deleting the route':'removing the DNS record'} for ${s.id}?`))return;if(action==='toggle')await api(endpoint(s.id),'PUT',{...s,enabled:!s.enabled});if(action==='delete')await api(endpoint(s.id),'DELETE');if(action==='dns')await api(endpoint(s.id)+'/dns','POST',{});if(action==='undns')await api(endpoint(s.id)+'/dns','DELETE');await refresh();});
-$('host-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{await api('/api/hosts','POST',Object.fromEntries(new FormData(e.target)));e.target.reset();await refresh();});};
-$('token-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{const b=Object.fromEntries(new FormData(e.target));for(const key of ['hosts','servers'])b[key]=b[key].split(',').map(s=>s.trim()).filter(Boolean);for(const key of ['portMin','portMax','days'])b[key]=Number(b[key]);const result=await api('/api/tokens','POST',b);$('token-secret').value=result.token;$('token-reveal').hidden=false;await refresh();});};
-$('dismiss-token').onclick=()=>{$('token-secret').value='';$('token-reveal').hidden=true;};
-$('token-list').onclick=e=>attempt(async()=>{const b=e.target.closest('[data-revoke]');if(b&&confirm('Revoke this token immediately?')){await api('/api/tokens/'+encodeURIComponent(b.dataset.revoke),'DELETE');await refresh();}});
+$('new-forward').onclick=()=>edit(); $('cancel-forward').onclick=()=>$('forward-form').hidden=true;
+$('forward-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{const f=e.target;const b=Object.fromEntries(new FormData(f));b.targetPort=Number(b.targetPort);b.publicPort=Number(b.publicPort);b.enabled=f.elements.enabled.checked;await request(endpoint(b.id),'PUT',b);f.hidden=true;await refresh();});};
+$('forward-list').onclick=e=>attempt(async()=>{
+  const button=e.target.closest('[data-action]');if(!button)return;
+  const f=state.forwards.find(f=>f.id===button.dataset.id);const action=button.dataset.action;
+  if(action==='edit')return edit(f);
+  if(['delete','undns'].includes(action)&&!confirm('Confirm '+(action==='delete'?'deleting the forwarding rule':'removing the DNS record')+' for '+f.id+'?'))return;
+  if(action==='toggle')await request(endpoint(f.id),'PUT',{...f,enabled:!f.enabled});
+  if(action==='delete')await request(endpoint(f.id),'DELETE');
+  if(action==='dns')await request(endpoint(f.id)+'/dns','POST',{});
+  if(action==='undns')await request(endpoint(f.id)+'/dns','DELETE');
+  await refresh();
+});
+function setupMethod() {
+  const enroll=$('host-setup').value==='new';
+  $('peer-options').hidden=!enroll;$('host-address').required=!enroll;$('host-address').placeholder=enroll?'Automatic if left blank':'10.8.0.2';
+}
+$('host-setup').onchange=setupMethod;
+$('new-host').onclick=()=>{const f=$('host-form');f.reset();f.hidden=false;setupMethod();f.scrollIntoView({behavior:'smooth',block:'center'});};
+$('cancel-host').onclick=()=>$('host-form').hidden=true;
+function showConfiguration(id, result) {
+  configurationName=id; $('config-text').value=result.configuration; $('host-config').hidden=false;
+  $('config-note').textContent=result.privateKeyIncluded?'Save this file now. Its private key is shown once and is not stored by UNM. Keep the file private.':'Replace <HOST_PRIVATE_KEY> with the private key already on this host. UNM does not retain host private keys.';
+  $('host-config').scrollIntoView({behavior:'smooth',block:'center'});
+}
+function clearConfiguration() { $('config-text').value='';$('host-config').hidden=true;configurationName=''; }
+$('close-config').onclick=clearConfiguration;
+$('download-config').onclick=()=>{const blob=new Blob([$('config-text').value],{type:'text/plain'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=configurationName+'.conf';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+$('host-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{
+  const f=e.target;const b=Object.fromEntries(new FormData(f));b.enroll=b.setup==='new';delete b.setup;
+  const submit=f.querySelector('button');submit.disabled=true;
+  try{const result=await request('/api/hosts','POST',b);f.hidden=true;if(result.configuration)showConfiguration(b.id,result);await refresh();}
+  finally{submit.disabled=false;}
+});};
+$('host-list').onclick=e=>attempt(async()=>{
+  const button=e.target.closest('[data-host-action]');if(!button)return;const id=button.dataset.id;
+  if(button.dataset.hostAction==='configuration'){showConfiguration(id,await request('/api/hosts/'+encodeURIComponent(id)+'/configuration'));return;}
+  const host=state.hosts.find(h=>h.id===id);
+  if(confirm(host.managed?'Remove '+id+' and its WireGuard peer from the VPS?':'Remove '+id+' from UNM? Its existing WireGuard peer stays in place.')){
+    await request('/api/hosts/'+encodeURIComponent(id),'DELETE');clearConfiguration();await refresh();
+  }
+});
+$('new-firewall').onclick=()=>{const f=$('firewall-form');f.reset();f.hidden=false;f.elements.port.min=state.portMin;f.elements.port.max=state.portMax;f.elements.port.value=state.portMin;};
+$('cancel-firewall').onclick=()=>$('firewall-form').hidden=true;
+$('firewall-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{const f=e.target;const b=Object.fromEntries(new FormData(f));b.port=Number(b.port);b.enabled=f.elements.enabled.checked;await request('/api/firewall','POST',b);f.hidden=true;await refresh();});};
+$('firewall-list').onclick=e=>attempt(async()=>{const button=e.target.closest('[data-firewall-action]');if(!button)return;const r=state.firewallRules.find(r=>r.id===button.dataset.id);if(button.dataset.firewallAction==='toggle')await request('/api/firewall','POST',{...r,enabled:!r.enabled});else if(confirm('Remove this port allowance?'))await request('/api/firewall/'+encodeURIComponent(r.id),'DELETE');else return;await refresh();});
 refresh().catch(()=>{});

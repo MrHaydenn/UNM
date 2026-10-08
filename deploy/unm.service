@@ -16,7 +16,7 @@ UMask=0077
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/unm /var/lib/unm-firewall
+ReadWritePaths=/var/lib/unm /var/lib/unm-firewall /var/lib/unm-wireguard /etc/wireguard
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 TimeoutStopSec=15
 

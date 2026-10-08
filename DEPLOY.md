@@ -4,7 +4,7 @@ Keep your current SSH session open throughout setup. Have the DigitalOcean conso
 
 ## 1. Inspect the VPS first
 
-Run these read-only commands on the VPS. Share the output if you want step-by-step help. Do not post WireGuard private keys, login passwords or Cloudflare API tokens.
+Run these read-only commands on the VPS. Share the output if you want step-by-step help. Do not post WireGuard private keys, login passwords or Cloudflare credentials.
 
 ```bash
 lsb_release -ds
@@ -20,9 +20,9 @@ sudo ss -lntup
 
 If `firewall-cmd` is absent or inactive, stop here and review the existing firewall. Do not install a second firewall manager blindly. `wg show` hides private keys, but it exposes peer public keys and endpoints; you can redact them.
 
-Choose an unused range, for example **25565–25600**. It must not overlap NPM Stream rules, Docker published ports, other listeners, or existing firewall port rules. Do not modify an existing rule to make the installer proceed. Select another range. The helper refuses to adopt pre-existing direct port rules, but broader zone/service/rich rules must be checked manually. The active external interface should be in a filtering zone such as `public`, not a blanket-accept zone.
+Choose an unused range, for example **20000–20099**. It must not overlap NPM Stream rules, Docker published ports, other listeners, or existing firewall port rules. Do not modify an existing rule to make the installer proceed. Select another range. The helper refuses to adopt pre-existing direct port rules, but broader zone/service/rich rules must be checked manually. The active external interface should be in a filtering zone such as `public`, not a blanket-accept zone.
 
-If you use a DigitalOcean Cloud Firewall, separately allow inbound TCP for the chosen game-port range. UNM cannot modify that firewall in this version. Retain SSH and WireGuard access.
+If you use a DigitalOcean Cloud Firewall, separately allow inbound TCP for the chosen forwarded-port range. UNM cannot modify that firewall in this version. Retain SSH and WireGuard access.
 
 ## 2. Clone and install in preview mode
 
@@ -30,7 +30,7 @@ For a public GitHub repository:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git python3 sudo curl
+sudo apt-get install -y git python3 sudo curl wireguard-tools
 sudo git clone https://github.com/MrHaydenn/UNM.git /opt/unm
 sudo bash /opt/unm/deploy/install.sh
 ```
@@ -68,7 +68,7 @@ Set:
 
 - `wireguard_subnet`: the subnet containing your PCs' tunnel IPv4 addresses.
 - `public_ip`: your VPS's public IPv4 address.
-- `dns_suffix`: for example `games.yourdomain.com`. UNM will only manage names below this suffix.
+- `dns_suffix`: for example `hosts.yourdomain.com`. UNM will only manage names below this suffix.
 - `cloudflare_zone_id`: the Zone ID for your existing Cloudflare domain.
 - `port_min` and `port_max`: the exclusive range you selected.
 - `firewall_zone`: the zone assigned to the external interface.
@@ -82,7 +82,7 @@ sudo nano /etc/unm/firewall.json
 
 Never shrink or change that range while it owns active rules. Disable/delete the managed routes first. Do not manually delete `/var/lib/unm-firewall/ports.json` while rules are active.
 
-In Cloudflare, create an API token with **Zone / DNS / Edit** permission scoped to your domain. Then save it privately on the VPS:
+In Cloudflare, create a DNS edit token with **Zone / DNS / Edit** permission scoped to your domain. Then save it privately on the VPS:
 
 ```bash
 sudo install -m 600 /dev/null /etc/unm/secrets.env
@@ -96,6 +96,61 @@ CLOUDFLARE_API_TOKEN=YOUR_TOKEN
 ```
 
 No NS change is required. Keep Cloudflare authoritative for the domain.
+
+## Configure WireGuard peer provisioning
+
+This uses your existing VPS WireGuard interface. Determine its name and IPv4 prefix from the inventory. Do not post its private key. The installer creates the helper settings with provisioning disabled.
+
+```bash
+sudo nano /etc/unm/wireguard.json
+```
+
+Example only — replace these values with your existing configuration:
+
+```json
+{
+  "enabled": true,
+  "interface": "wg0",
+  "subnet": "10.8.0.0/24",
+  "server_address": "10.8.0.1/24",
+  "endpoint": "YOUR_VPS_IP:51820"
+}
+```
+
+The panel's `wireguard_subnet` must match this subnet. The helper verifies the live interface address and listen port. The endpoint must be your public IPv4 address or hostname plus the existing WireGuard UDP port. Keep that UDP port allowed in both your existing firewall and any DigitalOcean Cloud Firewall; UNM does not change this gateway rule.
+
+Peer persistence requires a root-owned /etc/wireguard/INTERFACE.conf managed with wg-quick. If your interface is created by a container or another manager, stop and adapt the deployment first. Do not run two tools that independently rewrite the same peer list.
+
+Inspect SaveConfig without exposing the rest of the file:
+
+```bash
+sudo grep -i '^[[:space:]]*SaveConfig' /etc/wireguard/wg0.conf
+```
+
+If it says true, edit only that setting to false (or remove it). Do not restart the tunnel just to change this option. UNM makes root-only backups before peer edits. Other peer blocks and interface settings are preserved.
+
+After switching UNM to live mode and restarting it, open **WireGuard hosts → Add host → Create a new WireGuard peer**. You can leave the tunnel address blank for automatic allocation. Leave the public-key field blank to generate a key pair, or paste a public key already generated on the host.
+
+Save the downloaded configuration immediately. UNM does not store the generated private key. A later **Host setup** action returns a template with a private-key placeholder.
+
+On Windows, use WireGuard's **Import tunnel(s) from file** and activate the tunnel.
+
+On a Linux host, transfer the downloaded file privately and run:
+
+```bash
+sudo apt-get install -y wireguard-tools
+sudo install -m 600 home-server.conf /etc/wireguard/unm.conf
+sudo wg-quick up unm
+sudo systemctl enable wg-quick@unm
+sudo wg show unm
+```
+
+Use your downloaded filename instead of home-server.conf. Keep the configuration private. The host setup includes its /32 address, the VPS public key, public endpoint, the tunnel subnet as AllowedIPs and PersistentKeepalive=25. It does not route all internet traffic through the VPS. Refresh the host page to see the latest handshake.
+
+Existing hosts can instead be added with **Register an existing tunnel host**. Removing a registered host leaves its peer untouched. Removing a managed host removes its peer from the VPS live interface and persistent file; delete its forwarding rules first.
+
+If creation is interrupted after the file is saved but before the browser receives the configuration, inspect the marked peer block and helper backup via SSH before retrying. Generated private keys cannot be recovered from UNM. Do not delete unmanaged peer blocks.
+
 
 ## 4. Publish through NGINX Proxy Manager
 
@@ -134,12 +189,12 @@ Enable TOTP before publishing the admin panel. Keep Cockpit restricted to WireGu
 
 ## 5. Test one live route
 
-Register one PC in UNM using its WireGuard address. Create one server route using a public port that is unused. Start Minecraft Java on that PC and verify its local firewall permits TCP from the VPS through WireGuard.
+Register one host in UNM using its existing WireGuard address, or create a new peer as described above. Create one forwarding rule using an unused public port. Verify the destination service is running and its local firewall permits TCP from the VPS through WireGuard.
 
-From the VPS, check that Minecraft is reachable through the tunnel (replace the address/port):
+From the VPS, check that the destination service is reachable through the tunnel (replace the address/port):
 
 ```bash
-python3 -c "import socket; s=socket.create_connection(('10.8.0.2',25565),5); print('Minecraft port reachable'); s.close()"
+python3 -c "import socket; s=socket.create_connection(('10.8.0.2',8080),5); print('Destination port reachable'); s.close()"
 ```
 
 Change `mode` to `live`, then:
@@ -152,7 +207,7 @@ sudo journalctl -u unm -n 50 --no-pager
 sudo firewall-cmd --zone=public --list-ports
 ```
 
-Use your configured zone instead of `public` if different. Test from outside the tunnel with `YOUR_VPS_IP:PUBLIC_PORT`, then use **Sync DNS** and connect to `survival.games.yourdomain.com:PUBLIC_PORT`.
+Use your configured zone instead of `public` if different. Test from outside the tunnel with `YOUR_VPS_IP:PUBLIC_PORT`, then use **Sync DNS** and connect to `media.hosts.yourdomain.com:PUBLIC_PORT`.
 
 Test disabling the route: new connections should fail, and its direct firewalld port rule should disappear. Existing sessions can remain alive until disconnect. If a broader existing firewall rule permits the port, the panel cannot override that rule, but its listener still closes.
 
@@ -162,7 +217,7 @@ Test disabling the route: new connections should fail, and its direct firewalld 
 sudo bash /opt/unm/deploy/update.sh
 ```
 
-The updater backs up the database and configuration, validates the new build, then restarts it. A failed health check restores the previous commit and files. It never resets a dirty checkout. Active game connections disconnect during restart. Configuration lives outside Git and is preserved. No changes appear on the VPS until they have been pushed to GitHub and you run the update command.
+The updater backs up the database and configuration, validates the new build, then restarts it. A failed health check restores the previous commit and files. It never resets a dirty checkout. Active forwarded connections disconnect during restart. Configuration lives outside Git and is preserved. No changes appear on the VPS until they have been pushed to GitHub and you run the update command.
 
 If your web listener is no longer on loopback, the updater uses the configured bind address for its health check. Inspect logs on any failure.
 
@@ -179,4 +234,4 @@ Stopping UNM closes its TCP listeners but retains saved firewall rules. To close
 printf '[]' | sudo /usr/local/sbin/unm-firewall
 ```
 
-Do not uninstall firewalld, flush the firewall, or remove existing WireGuard/NPM services as part of troubleshooting. Back up `/etc/unm`, `/var/lib/unm`, and `/var/lib/unm-firewall` privately before moving this installation. Existing update backups contain secrets; retain them root-only and prune them periodically.
+Do not uninstall firewalld, flush the firewall, or remove existing WireGuard/NPM services as part of troubleshooting. Back up `/etc/unm`, `/var/lib/unm`, `/var/lib/unm-firewall`, `/var/lib/unm-wireguard`, and `/etc/wireguard` privately before moving this installation. Existing update backups contain secrets; retain them root-only and prune them periodically.

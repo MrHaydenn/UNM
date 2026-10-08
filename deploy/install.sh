@@ -9,6 +9,8 @@ id unm >/dev/null 2>&1 || useradd --system --home-dir /var/lib/unm --shell /usr/
 install -d -m 750 -o root -g unm /etc/unm
 install -d -m 700 -o unm -g unm /var/lib/unm
 install -d -m 700 -o root -g root /var/lib/unm-firewall
+install -d -m 700 -o root -g root /var/lib/unm-wireguard
+install -d -m 700 -o root -g root /etc/wireguard
 if [[ ! -f /etc/unm/config.json ]]; then
   python3 - <<'PY'
 import json
@@ -29,8 +31,19 @@ Path('/etc/unm/firewall.json').write_text(json.dumps({k:c[k] for k in ('port_min
 PY
 fi
 chmod 600 /etc/unm/firewall.json
+if [[ ! -f /etc/unm/wireguard.json ]]; then
+  python3 - <<'PY'
+import json
+from pathlib import Path
+c=json.loads(Path('/etc/unm/config.json').read_text())
+settings=dict(enabled=False,interface='wg0',subnet=c['wireguard_subnet'],server_address='10.8.0.1/24',endpoint='YOUR_VPS_IP:51820')
+Path('/etc/unm/wireguard.json').write_text(json.dumps(settings,indent=2)+'\n')
+PY
+fi
+chmod 600 /etc/unm/wireguard.json
 install -m 755 -o root -g root /opt/unm/deploy/unm-firewall /usr/local/sbin/unm-firewall
-printf 'unm ALL=(root) NOPASSWD: /usr/local/sbin/unm-firewall ""\n' >/etc/sudoers.d/unm
+install -m 755 -o root -g root /opt/unm/deploy/unm-wireguard /usr/local/sbin/unm-wireguard
+printf 'unm ALL=(root) NOPASSWD: /usr/local/sbin/unm-firewall "", /usr/local/sbin/unm-wireguard ""\n' >/etc/sudoers.d/unm
 chmod 440 /etc/sudoers.d/unm
 visudo -cf /etc/sudoers.d/unm
 install -m 644 /opt/unm/deploy/unm.service /etc/systemd/system/unm.service

@@ -16,6 +16,9 @@ install -d -m 700 "$backup"
 cp -a /var/lib/unm "$backup/data"
 cp -a /etc/unm "$backup/config"
 cp -a /usr/local/sbin/unm-firewall "$backup/helper"
+if [[ -f /usr/local/sbin/unm-wireguard ]]; then
+  cp -a /usr/local/sbin/unm-wireguard "$backup/wireguard-helper"
+fi
 cp -a /etc/systemd/system/unm.service "$backup/service"
 cp -a /etc/sudoers.d/unm "$backup/sudoers"
 rollback() {
@@ -24,6 +27,9 @@ rollback() {
   cp -a "$backup/data/." /var/lib/unm/
   cp -a "$backup/config/." /etc/unm/
   cp -a "$backup/helper" /usr/local/sbin/unm-firewall
+  if [[ -f "$backup/wireguard-helper" ]]; then
+    cp -a "$backup/wireguard-helper" /usr/local/sbin/unm-wireguard
+  fi
   cp -a "$backup/service" /etc/systemd/system/unm.service
   cp -a "$backup/sudoers" /etc/sudoers.d/unm
   systemctl daemon-reload
