@@ -164,6 +164,21 @@ class ControlTests(unittest.TestCase):
             self.assertEqual(self.req('/api/dns-records/'+dns['id'],'DELETE')[0],200)
         self.assertEqual(self.req('/api/websites/'+site['id'],'DELETE')[0],200)
 
+    def test_creating_websites_after_edit_preserves_existing_sites(self):
+        self.login()
+        body=dict(name='First site',domains=['first.example.com'],hostId='pc',port=8080,scheme='http',ssl=True,enabled=True)
+        code,first=self.req('/api/websites','POST',dict(body,id=''))
+        self.assertEqual(code,200)
+        code,edited=self.req('/api/websites','POST',dict(first,port=8090))
+        self.assertEqual(code,200)
+        code,second=self.req('/api/websites','POST',dict(body,id='',name='Second site',domains=['second.example.com']))
+        self.assertEqual(code,200)
+        self.assertNotEqual(first['id'],second['id'])
+        sites={site['id']:site for site in self.req('/api/state')[1]['websites']}
+        self.assertEqual(len(sites),2)
+        self.assertEqual(sites[first['id']],edited)
+        self.assertEqual(sites[second['id']],second)
+
     def test_failed_service_apply_keeps_saved_configuration(self):
         item=self.app.save_proxy(dict(name='My site',domains=['site.example.com'],hostId='pc',port=8080,scheme='http',ssl=True,enabled=True),'admin')
         with patch.object(self.app,'apply_services',side_effect=ValueError('reload failed')):
