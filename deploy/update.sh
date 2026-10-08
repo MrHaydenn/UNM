@@ -1,14 +1,38 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+# The update service uses a private umask; Git source must remain readable by unm.
+umask 022
 [[ $EUID -eq 0 ]] || { echo 'Run with sudo bash /opt/unm/deploy/update.sh'; exit 1; }
 cd /opt/unm
 [[ -z $(git status --porcelain) ]] || { echo 'Checkout has local changes; resolve them before updating.'; exit 1; }
+make_code_readable() {
+  python3 - <<'PY'
+import os
+from pathlib import Path
+import subprocess
+root = Path.cwd()
+root.chmod(root.stat().st_mode | 0o555)
+for raw in subprocess.check_output(['git', 'ls-files', '-z']).split(b'\0'):
+    if not raw:
+        continue
+    path = root / os.fsdecode(raw)
+    if path.is_symlink() or not path.is_file():
+        continue
+    path.chmod(path.stat().st_mode | 0o444)
+    for parent in path.parents:
+        if parent == root:
+            break
+        parent.chmod(parent.stat().st_mode | 0o555)
+PY
+}
+make_code_readable
 old=$(git rev-parse HEAD)
 git fetch origin main
 next=$(git rev-parse origin/main)
 [[ $old != "$next" ]] || { echo 'Already up to date.'; exit 0; }
 git merge-base --is-ancestor "$old" "$next" || { echo 'Update is not a fast-forward; stop and review.'; exit 1; }
 echo "Updating $old -> $next"
+trap 'systemctl start unm || true' ERR
 systemctl stop unm
 install -d -m 700 /var/backups/unm
 backup="/var/backups/unm/$(date -u +%Y%m%dT%H%M%SZ)"
@@ -28,6 +52,7 @@ fi
 rollback() {
   echo 'Update failed. Restoring the previous commit and configuration.'
   git checkout --detach "$old"
+  make_code_readable
   cp -a "$backup/data/." /var/lib/unm/
   cp -a "$backup/config/." /etc/unm/
   cp -a "$backup/helper" /usr/local/sbin/unm-firewall
@@ -47,6 +72,7 @@ rollback() {
 }
 trap rollback ERR
 git merge --ff-only origin/main
+make_code_readable
 python3 -m unittest discover -s tests -v
 sudo -u unm python3 /opt/unm/unm.py --config /etc/unm/config.json check
 bash deploy/install.sh
