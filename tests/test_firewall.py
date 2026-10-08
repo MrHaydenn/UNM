@@ -32,7 +32,7 @@ class FirewallTests(unittest.TestCase):
         key = (port, permanent)
         if action == 'query':
             return subprocess.CompletedProcess([], 0 if key in self.rules else 1)
-        if self.failed and action == 'add' and port == 25571 and permanent:
+        if self.failed and action == 'add' and port == '25571/tcp' and permanent:
             self.failed = False
             return subprocess.CompletedProcess([], 2)
         if action == 'add':
@@ -42,25 +42,37 @@ class FirewallTests(unittest.TestCase):
         return subprocess.CompletedProcess([], 0)
 
     def apply(self, ports):
-        with patch.object(self.helper.os, 'geteuid', return_value=0), patch.object(self.helper, 'run', side_effect=self.fake_run), patch.object(self.helper.sys, 'stdin', io.StringIO(json.dumps(ports))):
+        def change(zone, add, remove, permanent=False):
+            for p in add:
+                if self.fake_run(zone,'add',p,permanent).returncode:
+                    raise RuntimeError('Simulated failure')
+            for p in remove:
+                self.fake_run(zone,'remove',p,permanent)
+        with patch.object(self.helper.os, 'geteuid', return_value=0), patch.object(self.helper, 'listed', side_effect=lambda zone, permanent=False: {p for p,flag in self.rules if flag==permanent}), patch.object(self.helper, 'change', side_effect=change), patch.object(self.helper.sys, 'stdin', io.StringIO(json.dumps(ports))):
             self.helper.main()
+
+    def test_udp_and_service_control_gate(self):
+        self.apply(['25570/udp', '25570/tcp'])
+        self.assertEqual(len(self.rules),4)
+        with self.assertRaises(SystemExit):
+            self.apply(dict(action='stop'))
 
     def test_reserved_range_and_unmanaged_rule_rejection(self):
         with self.assertRaises(SystemExit):
             self.apply([22])
-        self.rules.add((25570, True))
+        self.rules.add(('25570/tcp', True))
         with self.assertRaises(SystemExit):
-            self.apply([25570])
-        self.assertEqual(self.rules, {(25570, True)})
+            self.apply(['25570/tcp'])
+        self.assertEqual(self.rules, {('25570/tcp', True)})
 
     def test_runtime_permanent_rules_and_rollback(self):
-        self.apply([25570])
+        self.apply(['25570/tcp'])
         before = self.rules.copy()
         self.failed = True
         with self.assertRaises(SystemExit):
             self.apply([25571])
         self.assertEqual(self.rules, before)
-        self.assertEqual(json.loads((self.helper.BASE / 'ports.json').read_text()), [25570])
+        self.assertEqual(json.loads((self.helper.BASE / 'ports.json').read_text()), ['25570/tcp'])
         self.apply([])
         self.assertEqual(self.rules, set())
 

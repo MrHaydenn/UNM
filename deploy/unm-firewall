@@ -14,49 +14,94 @@ def run(zone, action, port, permanent=False):
     command = ['/usr/bin/firewall-cmd', '--zone=' + zone]
     if permanent:
         command.append('--permanent')
-    command.append('--' + action + '-port=' + str(port) + '/tcp')
+    command.append('--' + action + '-port=' + str(port))
     return subprocess.run(command, capture_output=True, text=True, timeout=10)
+
+def listed(zone, permanent=False):
+    args = ['/usr/bin/firewall-cmd', '--zone=' + zone, '--list-ports']
+    if permanent:
+        args.append('--permanent')
+    result = subprocess.run(args, capture_output=True, text=True, timeout=10)
+    if result.returncode:
+        raise RuntimeError('Cannot list firewall ports')
+    ports = set()
+    for item in result.stdout.split():
+        numbers, protocol = item.split('/')
+        ends = numbers.split('-')
+        for port in range(int(ends[0]), int(ends[-1]) + 1):
+            ports.add(str(port) + '/' + protocol)
+    return ports
+
+def change(zone, add, remove, permanent=False):
+    if not add and not remove:
+        return
+    args = ['/usr/bin/firewall-cmd', '--zone=' + zone]
+    if permanent:
+        args.append('--permanent')
+    args += ['--add-port=' + p for p in sorted(add)]
+    args += ['--remove-port=' + p for p in sorted(remove)]
+    result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    # Sequence options can report success when only some changes succeeded.
+    actual = listed(zone, permanent)
+    if result.returncode or not add <= actual or remove & actual:
+        raise RuntimeError('Firewall change failed')
 
 def main():
     if os.geteuid() != 0:
         raise SystemExit('Root required')
     config = json.loads(CONFIG.read_text())
     low, high, zone = config['port_min'], config['port_max'], config['firewall_zone']
-    desired = json.loads(sys.stdin.read(4096))
-    if not isinstance(desired, list) or len(desired) > 200 or any(type(p) is not int or not low <= p <= high for p in desired):
+    desired = json.loads(sys.stdin.read(16384))
+    if isinstance(desired, dict):
+        action = desired.get('action')
+        if action not in ('status', 'start', 'stop'):
+            raise SystemExit('Invalid service action')
+        if action != 'status' and config.get('allow_service_control') is not True:
+            raise SystemExit('Service control is disabled in /etc/unm/firewall.json')
+        if action != 'status':
+            result = subprocess.run(['/usr/bin/systemctl', action, 'firewalld.service'], capture_output=True, text=True, timeout=25)
+            if result.returncode:
+                raise SystemExit('Cannot change firewalld service')
+        result = subprocess.run(['/usr/bin/systemctl', 'is-active', '--quiet', 'firewalld.service'], timeout=10)
+        print(json.dumps(dict(running=result.returncode == 0, controllable=config.get('allow_service_control') is True)))
+        return
+    def normalize(p):
+        if type(p) is int:
+            p = str(p) + '/tcp'
+        if not isinstance(p, str) or p.count('/') != 1:
+            raise ValueError('Invalid port')
+        number, protocol = p.split('/')
+        if not number.isdecimal() or protocol not in ('tcp', 'udp') or not low <= int(number) <= high:
+            raise ValueError('Invalid port')
+        return str(int(number)) + '/' + protocol
+    if not isinstance(desired, list) or len(desired) > 400:
         raise SystemExit('Invalid reserved port list')
-    desired = set(desired)
+    try:
+        desired = {normalize(p) for p in desired}
+    except ValueError:
+        raise SystemExit('Invalid reserved port list')
     with (BASE / 'lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         state = BASE / 'ports.json'
-        old = set(json.loads(state.read_text())) if state.exists() else set()
-        # Refuse to adopt direct port rules belonging to another administrator.
-        for port in desired - old:
-            for permanent in (False, True):
-                result = run(zone, 'query', port, permanent)
-                if result.returncode == 0:
-                    raise SystemExit('Port already has an unmanaged firewall rule: ' + str(port))
-                if result.returncode != 1:
-                    raise SystemExit('Cannot query firewall')
-        snapshot = {}
-        for port in old | desired:
-            for permanent in (False, True):
-                result = run(zone, 'query', port, permanent)
-                if result.returncode not in (0, 1):
-                    raise SystemExit('Cannot query firewall')
-                snapshot[port, permanent] = result.returncode == 0
+        old = {normalize(p) for p in json.loads(state.read_text())} if state.exists() else set()
+        snapshot = {permanent: listed(zone, permanent) for permanent in (False, True)}
+        if any((desired - old) & current for current in snapshot.values()):
+            raise SystemExit('Port already has an unmanaged firewall rule')
         try:
-            for port in old | desired:
-                for permanent in (False, True):
-                    if run(zone, 'add' if port in desired else 'remove', port, permanent).returncode != 0:
-                        raise RuntimeError('Firewall change failed')
+            for permanent, current in snapshot.items():
+                change(zone, desired - current, (old - desired) & current, permanent)
             temp = BASE / 'ports.tmp'
             temp.write_text(json.dumps(sorted(desired)))
             temp.replace(state)
         except Exception:
             failed = False
-            for (port, permanent), existed in snapshot.items():
-                failed |= run(zone, 'add' if existed else 'remove', port, permanent).returncode != 0
+            for permanent, previous in snapshot.items():
+                try:
+                    current = listed(zone, permanent)
+                    owned = old | desired
+                    change(zone, (previous - current) & owned, (current - previous) & owned, permanent)
+                except Exception:
+                    failed = True
             raise SystemExit('Firewall apply failed; rollback ' + ('FAILED' if failed else 'completed'))
 
 if __name__ == '__main__':

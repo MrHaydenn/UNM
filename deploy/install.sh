@@ -12,7 +12,14 @@ p=Path('/etc/unm/config.json')
 print(json.loads(p.read_text())['mode'] if p.exists() else 'preview')
 PY
 )
-  [[ "$install_mode" == preview ]] || { echo 'Live mode requires a running firewalld. Review existing rules before enabling it.'; exit 1; }
+  service_control=$(python3 - <<'PY'
+import json
+from pathlib import Path
+p=Path('/etc/unm/firewall.json')
+print('yes' if p.exists() and json.loads(p.read_text()).get('allow_service_control') is True else 'no')
+PY
+)
+  [[ "$install_mode" == preview || "$service_control" == yes ]] || { echo 'Live mode requires a running firewalld. Review existing rules before enabling it.'; exit 1; }
   echo 'firewalld is inactive: installing preview only. No firewall will be enabled or changed.'
 fi
 id unm >/dev/null 2>&1 || useradd --system --home-dir /var/lib/unm --shell /usr/sbin/nologin unm
@@ -37,7 +44,9 @@ if [[ ! -f /etc/unm/firewall.json ]]; then
 import json
 from pathlib import Path
 c=json.loads(Path('/etc/unm/config.json').read_text())
-Path('/etc/unm/firewall.json').write_text(json.dumps({k:c[k] for k in ('port_min','port_max','firewall_zone')},indent=2)+'\n')
+settings={k:c[k] for k in ('port_min','port_max','firewall_zone')}
+settings['allow_service_control']=False
+Path('/etc/unm/firewall.json').write_text(json.dumps(settings,indent=2)+'\n')
 PY
 fi
 chmod 600 /etc/unm/firewall.json

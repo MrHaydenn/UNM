@@ -113,6 +113,7 @@ class ControlTests(unittest.TestCase):
 
     def test_enrollment_allocation_and_private_key_is_not_persisted(self):
         self.login()
+        self.app.cfg['mode'] = 'live'
         private = base64.b64encode(bytes([4]) * 32).decode()
         public = base64.b64encode(bytes([5]) * 32).decode()
         status = dict(available=True, serverAddress='10.8.0.1/24', publicKey=base64.b64encode(bytes([9]) * 32).decode(),
@@ -133,6 +134,29 @@ class ControlTests(unittest.TestCase):
             self.assertNotIn(private, config['configuration'])
             self.assertEqual(self.req('/api/hosts/new-peer', 'DELETE')[0], 200)
             self.assertEqual(call.call_args.args[0]['action'], 'remove')
+
+    def test_ranges_protocols_names_and_master_preview(self):
+        self.login()
+        rule = dict(self.body(), publicPort='20080-20082', targetPort='8080-8082', protocol='both', name='Home media')
+        self.assertEqual(self.req('/api/forwards/media', 'PUT', rule)[0], 200)
+        self.assertEqual(self.req('/api/forwards/other', 'PUT', dict(rule, protocol='udp'))[0], 400)
+        self.assertEqual(self.req('/api/forwards/media', 'PUT', dict(rule, targetPort=8080))[0], 400)
+        self.assertEqual(self.req('/api/firewall', 'POST', dict(id='status', name='Status services', port='20090-20095', protocol='both', enabled=True))[0], 200)
+        self.assertEqual(self.req('/api/firewall/service', 'POST', dict(enabled=False))[0], 200)
+        self.assertFalse(self.req('/api/state')[1]['firewall']['enabled'])
+        self.assertEqual(self.req('/api/traffic?days=7')[0], 200)
+
+    def test_traffic_deltas_reset_and_retained_baseline(self):
+        now=time.time()
+        def sample(rx, tx, boot='first'):
+            return dict(bootId=boot, peers=[dict(publicKey='peer', rxBytes=rx, txBytes=tx)])
+        self.app.record_traffic(sample(1000,2000),now-120)
+        self.app.record_traffic(sample(1100,2200),now-60)
+        self.app.record_traffic(sample(50,70,'second'),now)
+        totals=self.app.traffic_summary(1)
+        self.assertEqual((totals['rx'],totals['tx']),(150,270))
+        self.app.record_traffic(sample(50,70,'second'),now+1)
+        self.assertEqual(self.app.traffic_summary(30)['rx'],150)
 
     def test_enrollment_failure_does_not_register_host(self):
         status = dict(available=True, serverAddress='10.8.0.1/24', publicKey=base64.b64encode(bytes([9]) * 32).decode(), endpoint='vps.example.com:51820', peers=[])
@@ -178,6 +202,38 @@ class ControlTests(unittest.TestCase):
 
 
 class ProxyTests(unittest.TestCase):
+    def test_udp_reply_client_isolation_and_disable(self):
+        proxy = unm.Proxy({'max_connections': 16})
+        async def exercise():
+            class Echo(asyncio.DatagramProtocol):
+                def connection_made(self, transport): self.transport=transport
+                def datagram_received(self, data, client): self.transport.sendto(data,client)
+            class Client(asyncio.DatagramProtocol):
+                def __init__(self): self.reply=asyncio.get_running_loop().create_future()
+                def datagram_received(self, data, address):
+                    if not self.reply.done(): self.reply.set_result(data)
+            upstream,_=await proxy.loop.create_datagram_endpoint(Echo,local_addr=('127.0.0.1',0))
+            reserved,_=await proxy.loop.create_datagram_endpoint(Echo,local_addr=('127.0.0.1',0))
+            port=reserved.get_extra_info('sockname')[1]
+            reserved.close();await asyncio.sleep(.02)
+            await proxy.reconcile([dict(address='127.0.0.1',targetPort=upstream.get_extra_info('sockname')[1],publicPort=port,protocol='udp',enabled=True)])
+            clients=[]
+            try:
+                for payload in (b'first-client',b'second-client'):
+                    transport,client=await proxy.loop.create_datagram_endpoint(Client,remote_addr=('127.0.0.1',port))
+                    clients.append(transport);transport.sendto(payload)
+                    self.assertEqual(await asyncio.wait_for(client.reply,3),payload)
+                await proxy.reconcile([])
+                self.assertEqual(proxy.listeners,{})
+            finally:
+                for transport in clients: transport.close()
+                upstream.close()
+                await proxy.reconcile([])
+                await asyncio.sleep(.05)
+        try:
+            asyncio.run_coroutine_threadsafe(exercise(),proxy.loop).result(10)
+        finally:
+            proxy.loop.call_soon_threadsafe(proxy.loop.stop);proxy.thread.join();proxy.loop.close()
     def test_real_tcp_forwarding_conflict_and_disable(self):
         proxy = unm.Proxy({'max_connections': 16})
 

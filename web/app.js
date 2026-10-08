@@ -26,23 +26,25 @@ async function refresh() {
   $('mode').textContent=state.mode === 'preview' ? 'Preview · no network changes' : 'Live';
   $('subtitle').textContent='Tunnel network '+state.subnet+' · Managed public ports '+state.portMin+'–'+state.portMax;
   const open = new Set([...state.forwards.filter(f=>f.enabled).map(f=>f.publicPort), ...state.firewallRules.filter(r=>r.enabled).map(r=>r.port)]);
-  $('stats').innerHTML = [[state.hosts.length,'WireGuard hosts'],[state.forwards.filter(f=>f.enabled).length,'Active forwards'],[open.size,'Allowed TCP ports']].map(([n,label])=>'<div class="stat"><b>'+n+'</b><span>'+label+'</span></div>').join('');
+  $('stats').innerHTML = [[state.hosts.length,'WireGuard hosts'],[state.forwards.filter(f=>f.enabled).length,'Active forwards'],[open.size,'Managed port entries']].map(([n,label])=>'<div class="stat"><b>'+n+'</b><span>'+label+'</span></div>').join('');
   $('forward-list').innerHTML=state.forwards.map(f=>{
     const button=(action,label)=>'<button data-action="'+action+'" data-id="'+esc(f.id)+'">'+label+'</button>';
-    return '<article class="card"><div><h3>'+esc(f.id)+' '+badge(f.enabled)+'</h3><p>TCP · VPS :'+f.publicPort+' → '+esc(f.hostId)+' :'+f.targetPort+'</p>'+(f.hostname?'<p>'+esc(f.hostname)+' · DNS: '+esc(f.dnsStatus)+'</p>':'')+'</div><div class="actions">'+button('edit','Edit')+button('toggle',f.enabled?'Disable':'Enable')+(f.hostname?button('dns','Sync DNS'):'')+(f.dnsRecordId?button('undns','Remove DNS'):'')+button('delete','Delete')+'</div></article>';
+    return '<article class="card"><div><h3>'+esc(f.name||f.id)+' '+badge(f.enabled)+'</h3><p>' +esc((f.protocol||'tcp').toUpperCase())+' · VPS :'+f.publicPort+' → '+esc(f.hostId)+' :'+f.targetPort+'</p>'+(f.hostname?'<p>'+esc(f.hostname)+' · DNS: '+esc(f.dnsStatus)+'</p>':'')+'</div><div class="actions">'+button('edit','Edit')+'<button role="switch" aria-checked="'+f.enabled+'" data-action="toggle" data-id="'+esc(f.id)+'">'+(f.enabled?'On':'Off')+'</button>'+(f.hostname?button('dns','Sync DNS'):'')+(f.dnsRecordId?button('undns','Remove DNS'):'')+button('delete','Delete')+'</div></article>';
   }).join('') || empty('Add a host, then create your first forwarding rule.');
   const wg=state.wireguard;
   $('wg-status').textContent=wg.available?wg.interface+' · VPS tunnel '+wg.serverAddress+' · Endpoint '+wg.endpoint:wg.message;
-  $('windows-ready').textContent=wg.available?'Ready: UNM can configure a new peer on the VPS.':'Not ready to connect: '+wg.message+' Complete VPS setup and enable live mode before adding a new peer.';
+  $('windows-ready').textContent=wg.available && wg.provisioningEnabled && state.mode==='live'?'Ready: UNM can configure a new peer on the VPS.':'Not ready to connect: '+(wg.message||'Peer provisioning is disabled.')+' Complete VPS setup and enable live mode before adding a new peer.';
   $('host-list').innerHTML=state.hosts.map(h=>{
-    const peer=(wg.peers||[]).find(p=>p.publicKey===h.publicKey);
+    const peer=peerForHost(h); const connected=peer?.lastHandshake && Date.now()/1000-peer.lastHandshake<180; const dot='<span class="status-dot '+(!wg.available?'unknown':connected?'connected':'disconnected')+'" title="'+(!wg.available?'Unknown':connected?'Recent handshake':'No recent handshake')+'"></span>';
     const status=peer?.lastHandshake?'Last handshake '+new Date(peer.lastHandshake*1000).toLocaleString():(h.managed?'Waiting for first handshake':'Existing tunnel');
-    return '<article class="card"><div><h3>'+esc(h.id)+' <span class="badge">'+(h.managed?'Managed peer':'Registered host')+'</span></h3><p>'+esc(h.address)+' · '+esc(status)+'</p></div><div class="actions">'+(h.managed?'<button data-host-action="configuration" data-id="'+esc(h.id)+'">Host setup</button>':'')+'<button data-host-action="delete" data-id="'+esc(h.id)+'">Remove</button></div></article>';
+    return '<article class="card"><div><h3>'+dot+esc(h.id)+' <span class="badge">'+(h.managed?'Managed peer':'Registered host')+'</span></h3><p>'+esc(h.address)+' · '+esc(status)+'</p></div><div class="actions">'+(h.managed?'<button data-host-action="configuration" data-id="'+esc(h.id)+'">Host setup</button>':'')+'<button data-host-action="delete" data-id="'+esc(h.id)+'">Remove</button></div></article>';
   }).join('') || empty('Register an existing host or create a new WireGuard peer.');
   $('firewall-list').innerHTML=[
-    ...state.forwards.filter(f=>f.enabled).map(f=>'<article class="card"><div><h3>TCP '+f.publicPort+'</h3><p>Opened by forwarding rule '+esc(f.id)+'</p></div><span class="badge">Automatic</span></article>'),
-    ...state.firewallRules.map(r=>'<article class="card"><div><h3>'+esc(r.id)+' '+badge(r.enabled)+'</h3><p>TCP '+r.port+'</p></div><div class="actions"><button data-firewall-action="toggle" data-id="'+esc(r.id)+'">'+(r.enabled?'Disable':'Enable')+'</button><button data-firewall-action="delete" data-id="'+esc(r.id)+'">Remove</button></div></article>')
+    ...state.forwards.filter(f=>f.enabled).map(f=>'<article class="card"><div><h3>'+esc((f.protocol||'tcp').toUpperCase())+' '+f.publicPort+'</h3><p>Opened by forwarding rule '+esc(f.id)+'</p></div><span class="badge">Automatic</span></article>'),
+    ...state.firewallRules.map(r=>'<article class="card"><div><h3>'+esc(r.name||r.id)+' '+badge(r.enabled)+'</h3><p>'+esc((r.protocol||'tcp').toUpperCase())+' '+r.port+'</p></div><div class="actions"><button role="switch" aria-checked="'+r.enabled+'" data-firewall-action="toggle" data-id="'+esc(r.id)+'">'+(r.enabled?'On':'Off')+'</button><button data-firewall-action="edit" data-id="'+esc(r.id)+'">Edit</button><button data-firewall-action="delete" data-id="'+esc(r.id)+'">Remove</button></div></article>')
   ].join('') || empty('No managed port allowances yet.');
+  const fw=state.firewall; const active=fw.running??fw.enabled; $('firewall-master').setAttribute('aria-checked',String(active)); $('firewall-master').textContent=active?'On':'Off'; $('firewall-master').disabled=state.mode==='live'&&!fw.controllable; $('firewall-status').textContent=fw.preview?'Preview · saved setting '+(fw.enabled?'on':'off'):fw.running===null?'Service status unavailable':(fw.running?'Running':'Stopped')+(fw.controllable?'':' · service control disabled in VPS settings');
+  await renderTraffic();
   $('audit-list').innerHTML='<table><thead><tr><th>Time</th><th>Account</th><th>Change</th><th>Resource</th></tr></thead><tbody>'+state.audit.map(a=>'<tr><td>'+esc(new Date(a.at*1000).toLocaleString())+'</td><td>'+esc(a.actor)+'</td><td>'+esc(a.action)+'</td><td>'+esc(a.resource)+'</td></tr>').join('')+'</tbody></table>';
 }
 $('login-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{await request('/api/login','POST',Object.fromEntries(new FormData(e.target)));e.target.reset();await refresh();});};
@@ -60,7 +62,7 @@ function edit(rule) {
   f.scrollIntoView({behavior:'smooth',block:'center'});
 }
 $('new-forward').onclick=()=>edit(); $('cancel-forward').onclick=()=>$('forward-form').hidden=true;
-$('forward-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{const f=e.target;const b=Object.fromEntries(new FormData(f));b.targetPort=Number(b.targetPort);b.publicPort=Number(b.publicPort);b.enabled=f.elements.enabled.checked;await request(endpoint(b.id),'PUT',b);f.hidden=true;await refresh();});};
+$('forward-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{const f=e.target;const b=Object.fromEntries(new FormData(f));b.enabled=f.elements.enabled.checked;await request(endpoint(b.id),'PUT',b);f.hidden=true;await refresh();});};
 $('forward-list').onclick=e=>attempt(async()=>{
   const button=e.target.closest('[data-action]');if(!button)return;
   const f=state.forwards.find(f=>f.id===button.dataset.id);const action=button.dataset.action;
@@ -106,8 +108,16 @@ $('host-list').onclick=e=>attempt(async()=>{
     await request('/api/hosts/'+encodeURIComponent(id),'DELETE');clearConfiguration();await refresh();
   }
 });
-$('new-firewall').onclick=()=>{const f=$('firewall-form');f.reset();f.hidden=false;f.elements.port.min=state.portMin;f.elements.port.max=state.portMax;f.elements.port.value=state.portMin;};
+$('new-firewall').onclick=()=>{const f=$('firewall-form');f.reset();f.elements.id.readOnly=false;f.hidden=false;f.elements.port.min=state.portMin;f.elements.port.max=state.portMax;f.elements.port.value=state.portMin;};
 $('cancel-firewall').onclick=()=>$('firewall-form').hidden=true;
-$('firewall-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{const f=e.target;const b=Object.fromEntries(new FormData(f));b.port=Number(b.port);b.enabled=f.elements.enabled.checked;await request('/api/firewall','POST',b);f.hidden=true;await refresh();});};
-$('firewall-list').onclick=e=>attempt(async()=>{const button=e.target.closest('[data-firewall-action]');if(!button)return;const r=state.firewallRules.find(r=>r.id===button.dataset.id);if(button.dataset.firewallAction==='toggle')await request('/api/firewall','POST',{...r,enabled:!r.enabled});else if(confirm('Remove this port allowance?'))await request('/api/firewall/'+encodeURIComponent(r.id),'DELETE');else return;await refresh();});
+$('firewall-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{const f=e.target;const b=Object.fromEntries(new FormData(f));b.enabled=f.elements.enabled.checked;await request('/api/firewall','POST',b);f.hidden=true;await refresh();});};
+$('firewall-list').onclick=e=>attempt(async()=>{const button=e.target.closest('[data-firewall-action]');if(!button)return;const r=state.firewallRules.find(r=>r.id===button.dataset.id);if(button.dataset.firewallAction==='edit'){const f=$('firewall-form');f.reset();f.hidden=false;for(const [k,v] of Object.entries(r))if(f.elements[k]){if(k==='enabled')f.elements[k].checked=v;else f.elements[k].value=v;}f.elements.id.readOnly=true;return;}if(button.dataset.firewallAction==='toggle')await request('/api/firewall','POST',{...r,enabled:!r.enabled});else if(confirm('Remove this port allowance?'))await request('/api/firewall/'+encodeURIComponent(r.id),'DELETE');else return;await refresh();});
 refresh().catch(()=>{});
+
+function peerForHost(h){return (state.wireguard.peers||[]).find(p=>(h.publicKey&&p.publicKey===h.publicKey)||(p.allowedIPs||[]).includes(h.address+'/32'));}
+function bytes(n){if(n<1024)return n+' B';const i=Math.min(4,Math.floor(Math.log(n)/Math.log(1024)));return (n/1024**i).toFixed(2)+' '+['B','KiB','MiB','GiB','TiB'][i];}
+function rate(n){return (n*8/1000000).toFixed(3)+' Mbit/s';}
+async function renderTraffic(){const t=await request('/api/traffic?days='+$('traffic-period').value);$('traffic-note').textContent=t.message;$('traffic-stats').innerHTML=[['Received',bytes(t.rx)],['Sent',bytes(t.tx)],['Receive rate',rate(t.rxRate)],['Send rate',rate(t.txRate)]].map(([label,value])=>'<div class="stat"><b>'+value+'</b><span>'+label+'</span></div>').join('');$('traffic-peers').innerHTML=t.peers.map(p=>{const host=state.hosts.find(h=>peerForHost(h)?.publicKey===p.peer);return '<article class="card"><div><h3>'+esc(host?.id||'Unregistered peer '+p.peer.slice(0,8))+'</h3><p>Received '+bytes(p.rx)+' · Sent '+bytes(p.tx)+'</p><p>'+rate(p.rxRate)+' in · '+rate(p.txRate)+' out</p></div></article>';}).join('')||empty('Waiting for the first successful traffic sample.');$('traffic-daily').innerHTML='<table><thead><tr><th>Day</th><th>Received</th><th>Sent</th></tr></thead><tbody>'+t.daily.map(d=>'<tr><td>'+esc(d.day)+'</td><td>'+bytes(d.rx)+'</td><td>'+bytes(d.tx)+'</td></tr>').join('')+'</tbody></table>';}
+$('traffic-period').onchange=()=>attempt(renderTraffic);
+$('firewall-master').onclick=()=>attempt(async()=>{const enabled=!((state.firewall.running??state.firewall.enabled));if(!enabled&&state.mode==='live'&&!confirm('Stop all of firewalld? This removes firewall protection for every service on the VPS.'))return;await request('/api/firewall/service','POST',{enabled});await refresh();});
+setInterval(()=>{if(state && $('forward-form').hidden && $('host-form').hidden && $('firewall-form').hidden && $('host-config').hidden)refresh().catch(()=>{});},60000);

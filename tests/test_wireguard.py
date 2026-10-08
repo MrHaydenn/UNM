@@ -49,6 +49,8 @@ class WireGuardHelperTests(unittest.TestCase):
                 return '51820'
             if args[-1] == 'allowed-ips':
                 return '\n'.join(k + '\t' + v for k, v in self.runtime.items())
+            if args[-1] == 'transfer':
+                return '\n'.join(k + '\t100\t200' for k in self.runtime)
             if args[-1] == 'latest-handshakes':
                 return '\n'.join(k + '\t1234' for k in self.runtime)
         if args[1] == 'set':

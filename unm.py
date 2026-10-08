@@ -22,6 +22,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, urlencode
 from urllib.request import Request, urlopen
 from networking import Networking
+from ports import port_range, protocols, sockets, label
+from udp_proxy import UDPProxy
+from traffic import Traffic
 
 ROOT = Path(__file__).resolve().parent
 LOCK = threading.RLock()
@@ -92,36 +95,54 @@ class Proxy:
                     stream.close()
 
     async def reconcile(self, entries):
-        wanted = {r['publicPort']: (r['address'], r['targetPort']) for r in entries if r['enabled']}
+        wanted = {}
+        for r in entries:
+            if not r['enabled']:
+                continue
+            public_start, public_end = port_range(r['publicPort'])
+            target_start, _ = port_range(r['targetPort'])
+            for port in range(public_start, public_end + 1):
+                for protocol in protocols(r.get('protocol', 'tcp')):
+                    wanted[port, protocol] = (r['address'], target_start + port - public_start)
         # Bind new sockets before removing existing listeners. Bind failure leaves old service intact.
         added = {}
         try:
-            for port, target in wanted.items():
-                if port not in self.listeners:
-                    async def accept(reader, writer, p=port):
+            for key, target in wanted.items():
+                if key not in self.listeners:
+                    port, protocol = key
+                    async def accept(reader, writer, p=key):
                         await self.connect(reader, writer, self.listeners[p][1])
-                    added[port] = (await asyncio.start_server(accept, '0.0.0.0', port, start_serving=False, reuse_address=False), target)
+                    if protocol == 'tcp':
+                        server = await asyncio.start_server(accept, '0.0.0.0', port, start_serving=False, reuse_address=False)
+                    else:
+                        _, server = await self.loop.create_datagram_endpoint(lambda t=target: UDPProxy(t, self.cfg['max_connections']), local_addr=('0.0.0.0', port))
+                    added[key] = (server, target)
         except Exception:
             for server, _ in added.values():
                 server.close()
-                await server.wait_closed()
+                if isinstance(server, asyncio.Server):
+                    await server.wait_closed()
             raise
         self.listeners.update(added)
         for port in list(self.listeners):
             if port not in wanted:
                 server, _ = self.listeners.pop(port)
                 server.close()
-                await server.wait_closed()
+                if isinstance(server, asyncio.Server):
+                    await server.wait_closed()
             else:
+                if isinstance(self.listeners[port][0], UDPProxy):
+                    self.listeners[port][0].update_target(wanted[port])
                 self.listeners[port] = (self.listeners[port][0], wanted[port])
         for server, _ in added.values():
-            await server.start_serving()
+            if isinstance(server, asyncio.Server):
+                await server.start_serving()
 
     def apply(self, entries):
         asyncio.run_coroutine_threadsafe(self.reconcile(entries), self.loop).result(20)
 
 
-class App(Networking):
+class App(Networking, Traffic):
     def __init__(self, config):
         self.cfg = json.loads(Path(config).read_text())
         c = self.cfg
@@ -147,6 +168,8 @@ class App(Networking):
         CREATE TABLE IF NOT EXISTS tokens(id TEXT PRIMARY KEY, hash TEXT NOT NULL, body TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS firewall_rules(id TEXT PRIMARY KEY, port INTEGER UNIQUE NOT NULL, enabled INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS audit(at INTEGER, actor TEXT, action TEXT, resource TEXT);
+        CREATE TABLE IF NOT EXISTS firewall_items(id TEXT PRIMARY KEY,body TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
         ''')
         columns = {r['name'] for r in self.db.execute('PRAGMA table_info(hosts)')}
         if 'public_key' not in columns:
@@ -155,7 +178,12 @@ class App(Networking):
             self.db.execute('ALTER TABLE hosts ADD COLUMN managed INTEGER NOT NULL DEFAULT 0')
         # External tokens are retired; existing forwarding entries remain intact.
         self.db.execute('DELETE FROM tokens')
+        for row in self.db.execute('SELECT * FROM firewall_rules').fetchall():
+            item = dict(id=row['id'], name=row['id'], port=row['port'], protocol='tcp', enabled=bool(row['enabled']))
+            self.db.execute('INSERT OR IGNORE INTO firewall_items VALUES(?,?)', (row['id'], json.dumps(item)))
+        self.db.execute('DELETE FROM firewall_rules')
         self.db.commit()
+        self.init_traffic()
         self.sessions, self.attempts, self.otp_used = {}, {}, {}
         self.proxy = Proxy(c) if c['mode'] == 'live' else None
 
@@ -177,10 +205,18 @@ class App(Networking):
     def firewall(self, entries, rules=None):
         if self.proxy:
             rules = self.firewall_rules() if rules is None else rules
-            ports = sorted({r['publicPort'] for r in entries if r['enabled']} |
-                           {r['port'] for r in rules if r['enabled']})
+            if not self.firewall_enabled():
+                return
+            desired = set()
+            for r in entries:
+                if r['enabled']:
+                    desired |= sockets(r)
+            for r in rules:
+                if r['enabled']:
+                    desired |= sockets(r, 'port')
+            ports = sorted(str(p) + '/' + proto for p, proto in desired)
             subprocess.run(['sudo', '-n', '/usr/local/sbin/unm-firewall'], input=json.dumps(ports),
-                           text=True, capture_output=True, check=True, timeout=30)
+                           text=True, capture_output=True, check=True, timeout=120)
 
     def apply(self, entries):
         if self.proxy:
@@ -192,11 +228,14 @@ class App(Networking):
         host = body.get('hostId')
         if host not in {h['id'] for h in self.hosts()}:
             raise ValueError('Unknown hostId; register this host first.')
-        for field in ('targetPort', 'publicPort'):
-            if type(body.get(field)) is not int or not 1 <= body[field] <= 65535:
-                raise ValueError(field + ' must be an integer port')
-        port = body['publicPort']
-        if not self.cfg['port_min'] <= port <= self.cfg['port_max']:
+        start, end = port_range(body.get('publicPort'))
+        target_start, target_end = port_range(body.get('targetPort'))
+        if end - start != target_end - target_start:
+            raise ValueError('Public and destination ranges must contain the same number of ports')
+        protocol = body.get('protocol', 'tcp')
+        protocols(protocol)
+        port = start if start == end else str(start) + '-' + str(end)
+        if not self.cfg['port_min'] <= start <= end <= self.cfg['port_max']:
             raise ValueError('Public port is outside the reserved range')
         if type(body.get('enabled')) is not bool:
             raise ValueError('enabled must be true or false')
@@ -206,12 +245,12 @@ class App(Networking):
                          any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', p) for p in hostname.split('.'))):
             raise ValueError('Hostname must be a valid name under ' + suffix)
         for r in self.servers():
-            if r['id'] != sid and (r['publicPort'] == port or (hostname and r['hostname'] == hostname)):
+            if r['id'] != sid and (sockets(r) & sockets(dict(publicPort=port,protocol=protocol)) or (hostname and r['hostname'] == hostname)):
                 raise ValueError('Port or hostname already belongs to another forwarding route')
         old = next((r for r in self.servers() if r['id'] == sid), None)
         if old and old.get('dnsRecordId') and hostname != old['hostname']:
             raise ValueError('Remove the managed DNS record before changing its hostname')
-        return dict(id=sid, hostId=host, targetPort=body['targetPort'], publicPort=port,
+        return dict(id=sid, name=label(dict(body,id=sid)), protocol=protocol, hostId=host, targetPort=target_start if target_start == target_end else str(target_start)+'-'+str(target_end), publicPort=port,
                     hostname=hostname, enabled=body['enabled'], dnsRecordId=(old or {}).get('dnsRecordId'),
                     dnsStatus=(old or {}).get('dnsStatus', 'Not synced'))
 
@@ -378,6 +417,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/state' and self.command == 'GET':
             return self.send(200, dict(user=actor, csrf=session['csrf'], hosts=app.hosts(), forwards=app.servers(),
                                       firewallRules=app.firewall_rules(), wireguard=app.wg_status(),
+                                      firewall=app.firewall_state(),traffic=app.traffic_summary(30),
                                       mode=app.cfg['mode'], portMin=app.cfg['port_min'], portMax=app.cfg['port_max'],
                                       subnet=app.cfg['wireguard_subnet'], dnsSuffix=app.cfg['dns_suffix'],
                                       audit=[dict(r) for r in app.db.execute('SELECT * FROM audit ORDER BY rowid DESC LIMIT 40')]))
@@ -400,6 +440,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/firewall' and self.command == 'POST':
             app.save_firewall_rule(self.read_body(), actor)
             return self.send(200, {'ok': True})
+        if path == '/api/firewall/service' and self.command == 'POST':
+            app.set_firewall_enabled(self.read_body().get('enabled'),actor)
+            return self.send(200, {'ok':True})
+        if path == '/api/traffic' and self.command == 'GET':
+            from urllib.parse import parse_qs
+            days=int(parse_qs(urlsplit(self.path).query).get('days',['30'])[0])
+            if days not in (1,7,30):
+                raise ValueError('Choose 1, 7 or 30 days')
+            return self.send(200,app.traffic_summary(days))
         if len(parts) == 3 and parts[:2] == ['api', 'firewall'] and self.command == 'DELETE':
             app.delete_firewall_rule(valid_id(parts[2]), actor)
             return self.send(200, {'ok': True})
@@ -484,6 +533,17 @@ def main():
     app.apply(app.servers())
     server = ThreadingHTTPServer((app.cfg['bind'], app.cfg['port']), Handler)
     server.app = app
+    def collect():
+        while True:
+            try:
+                with LOCK:
+                    status=app.wg_status()
+                    if status.get('available'):
+                        app.record_traffic(status)
+            except Exception:
+                LOG.warning('Traffic sample unavailable')
+            time.sleep(60)
+    threading.Thread(target=collect,daemon=True).start()
     LOG.info('UNM listening on %s:%s in %s mode', app.cfg['bind'], app.cfg['port'], app.cfg['mode'])
     server.serve_forever()
 

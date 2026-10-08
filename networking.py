@@ -4,6 +4,7 @@ import ipaddress
 import json
 import re
 import subprocess
+from ports import port_range, protocols, sockets, label
 
 
 def valid_id(value):
@@ -24,7 +25,7 @@ def valid_key(value):
 
 class Networking:
     def wg_call(self, payload):
-        if self.cfg['mode'] != 'live':
+        if self.cfg['mode'] != 'live' and payload.get('action') not in ('status', 'monitor'):
             raise ValueError('Peer changes are disabled in preview mode')
         response = subprocess.run(['sudo', '-n', '/usr/local/sbin/unm-wireguard'], input=json.dumps(payload),
                                   text=True, capture_output=True, timeout=30)
@@ -35,14 +36,12 @@ class Networking:
         return json.loads(response.stdout)
 
     def wg_status(self):
-        if self.cfg['mode'] == 'preview':
-            return dict(available=False, message='Preview: peer provisioning requires a configured VPS.', peers=[])
         try:
-            status = self.wg_call({'action': 'status'})
+            status = self.wg_call({'action': 'monitor'})
             if ipaddress.ip_interface(status['serverAddress']).network != ipaddress.ip_network(self.cfg['wireguard_subnet']):
                 raise ValueError('WireGuard helper and panel subnets do not match')
             return dict(status, available=True)
-        except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        except (ValueError, OSError, subprocess.TimeoutExpired, KeyError) as exc:
             return dict(available=False, message=str(exc), peers=[])
 
     def allocate_address(self, status):
@@ -79,6 +78,8 @@ class Networking:
             status = self.wg_status()
             if not status['available']:
                 raise ValueError(status['message'])
+            if self.cfg['mode'] != 'live' or not status.get('provisioningEnabled', True):
+                raise ValueError('New peer creation requires live mode and enabled VPS provisioning')
             public = body.get('publicKey', '').strip()
             if public:
                 valid_key(public)
@@ -124,23 +125,64 @@ class Networking:
         self.db.commit()
 
     def firewall_rules(self):
-        return [dict(id=r['id'], port=r['port'], enabled=bool(r['enabled'])) for r in
-                self.db.execute('SELECT * FROM firewall_rules ORDER BY port')]
+        return [json.loads(r['body']) for r in self.db.execute('SELECT * FROM firewall_items ORDER BY id')]
+
+    def firewall_enabled(self):
+        row = self.db.execute("SELECT value FROM settings WHERE key='firewall_enabled'").fetchone()
+        return not row or row['value'] == 'true'
+
+    def firewall_service(self, action):
+        result = subprocess.run(['sudo','-n','/usr/local/sbin/unm-firewall'], input=json.dumps(dict(action=action)), text=True,capture_output=True,timeout=30)
+        if result.returncode:
+            raise ValueError('Firewall service control failed. Configure allow_service_control on the VPS after preserving existing service access.')
+        return json.loads(result.stdout)
+
+    def firewall_state(self):
+        if self.cfg['mode'] == 'preview':
+            return dict(enabled=self.firewall_enabled(), running=None, preview=True)
+        try:
+            return dict(self.firewall_service('status'), enabled=self.firewall_enabled(), preview=False)
+        except (ValueError,OSError,subprocess.TimeoutExpired):
+            return dict(enabled=self.firewall_enabled(),running=None,preview=False)
+
+    def set_firewall_enabled(self, enabled, actor):
+        if type(enabled) is not bool:
+            raise ValueError('enabled must be true or false')
+        old = self.firewall_enabled()
+        if self.cfg['mode'] == 'live':
+            old = self.firewall_service('status')['running']
+            self.firewall_service('start' if enabled else 'stop')
+        try:
+            self.db.execute("INSERT OR REPLACE INTO settings VALUES('firewall_enabled',?)", ('true' if enabled else 'false',))
+            if enabled:
+                self.firewall(self.servers())
+            self.audit(actor,'firewall.service.start' if enabled else 'firewall.service.stop','firewalld')
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            if self.cfg['mode'] == 'live':
+                self.firewall_service('start' if old else 'stop')
+            raise
 
     def save_firewall_rule(self, body, actor):
         rid = valid_id(body.get('id'))
         port, enabled = body.get('port'), body.get('enabled')
-        if type(port) is not int or not self.cfg['port_min'] <= port <= self.cfg['port_max']:
-            raise ValueError('Choose a TCP port inside the reserved range')
+        start, end = port_range(port)
+        if not self.cfg['port_min'] <= start <= end <= self.cfg['port_max']:
+            raise ValueError('Choose ports inside the reserved range')
+        port = start if start == end else str(start)+'-'+str(end)
+        protocol = body.get('protocol','tcp')
+        protocols(protocol)
         if type(enabled) is not bool:
             raise ValueError('enabled must be true or false')
         old = self.firewall_rules()
-        new = [r for r in old if r['id'] != rid] + [dict(id=rid, port=port, enabled=enabled)]
-        if any(r['port'] == port and r['id'] != rid for r in old):
+        item = dict(id=rid,name=label(body),port=port,protocol=protocol,enabled=enabled)
+        new = [r for r in old if r['id'] != rid] + [item]
+        if any(sockets(r,'port') & sockets(item,'port') and r['id'] != rid for r in old):
             raise ValueError('A firewall entry already uses this port')
         try:
             self.firewall(self.servers(), new)
-            self.db.execute('INSERT OR REPLACE INTO firewall_rules VALUES(?,?,?)', (rid, port, int(enabled)))
+            self.db.execute('INSERT OR REPLACE INTO firewall_items VALUES(?,?)', (rid,json.dumps(item)))
             self.audit(actor, 'firewall.save', rid)
             self.db.commit()
         except Exception:
@@ -152,7 +194,7 @@ class Networking:
         old = self.firewall_rules()
         try:
             self.firewall(self.servers(), [r for r in old if r['id'] != rid])
-            self.db.execute('DELETE FROM firewall_rules WHERE id=?', (rid,))
+            self.db.execute('DELETE FROM firewall_items WHERE id=?', (rid,))
             self.audit(actor, 'firewall.remove', rid)
             self.db.commit()
         except Exception:

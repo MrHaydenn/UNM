@@ -84,7 +84,11 @@ def live_status(cfg):
     handshakes = dict(line.split('\t', 1) for line in command(['/usr/bin/wg', 'show', iface, 'latest-handshakes']).splitlines())
     for peer in peers:
         peer['lastHandshake'] = int(handshakes.get(peer['publicKey'], 0))
-    return dict(interface=iface, serverAddress=str(server), publicKey=public, endpoint=endpoint, peers=peers)
+    transfers = {p[0]: (int(p[1]),int(p[2])) for p in (line.split('\t') for line in command(['/usr/bin/wg','show',iface,'transfer']).splitlines())}
+    for peer in peers:
+        peer['rxBytes'], peer['txBytes'] = transfers.get(peer['publicKey'],(0,0))
+    return dict(interface=iface, serverAddress=str(server), publicKey=public, endpoint=endpoint, peers=peers,
+                bootId=Path('/proc/sys/kernel/random/boot_id').read_text().strip(), provisioningEnabled=bool(cfg.get('enabled')))
 
 
 def write_config(path, text):
@@ -98,7 +102,7 @@ def write_config(path, text):
 
 
 def execute(cfg, request):
-    if not cfg.get('enabled'):
+    if not cfg.get('enabled') and request.get('action') != 'monitor':
         fail('Peer provisioning is disabled. Configure /etc/unm/wireguard.json on the VPS first.')
     iface = cfg['interface']
     if not re.fullmatch(r'[a-zA-Z0-9_-]{1,15}', iface):
@@ -107,7 +111,7 @@ def execute(cfg, request):
     if path.is_symlink():
         fail('Symlinked WireGuard configurations are not supported')
     text = path.read_text(encoding='utf-8')
-    if re.search(r'(?im)^\s*SaveConfig\s*=\s*true\s*(?:#.*)?$', text):
+    if request.get('action') != 'monitor' and re.search(r'(?im)^\s*SaveConfig\s*=\s*true\s*(?:#.*)?$', text):
         fail('Set SaveConfig = false before using peer provisioning')
     status = live_status(cfg)
     # Include persistent peers when allocating an address, even if temporarily absent at runtime.
@@ -120,7 +124,7 @@ def execute(cfg, request):
         merged[peer['publicKey']] = peer
     status['peers'] = list(merged.values())
     action = request.get('action')
-    if action == 'status':
+    if action in ('status','monitor'):
         return status
     hid = request.get('id')
     if not isinstance(hid, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,47}', hid):

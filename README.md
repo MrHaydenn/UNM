@@ -1,6 +1,6 @@
 # UNM — Ubuntu Network Manager
 
-A focused web panel for an Ubuntu VPS: WireGuard hosts, TCP port forwarding, firewall allowances and optional DNS records. Python 3.10+ with no third-party Python dependencies.
+A focused web panel for an Ubuntu VPS: WireGuard hosts, TCP/UDP port forwarding, firewall allowances, traffic history and optional DNS records. Python 3.10+ with no third-party Python dependencies.
 
 ## Features
 
@@ -8,14 +8,18 @@ A focused web panel for an Ubuntu VPS: WireGuard hosts, TCP port forwarding, fir
 - Register existing WireGuard hosts without changing their tunnels.
 - Create new WireGuard peers: check address/key conflicts, allocate a free IPv4 address, generate keys or accept a host public key, and persist the peer on the VPS without restarting the interface.
 - Show/download the host's WireGuard configuration. Generated host private keys are shown once and are not saved in the database.
-- Forward a public VPS TCP port to any service on a registered tunnel host.
-- Automatically manage forwarding firewall ports, plus independent TCP port allowances within a reserved range.
+- Named forwarding and firewall rules with single ports or ranges, TCP, UDP or both, and individual switches.
+- A master switch starts/stops all of firewalld when explicitly enabled in the root settings.
+- Tunnel status indicators use recent handshakes: green within 180 seconds, red otherwise, gray when unavailable.
+- Persistent traffic totals for today, the last seven days and the last 30 days, with daily UTC totals and average receive/send rates per peer and overall.
 - Optional DNS-only A records through your existing Cloudflare account.
 - Preview mode and a backed-up GitHub update workflow.
 
 ## Setup
 
 Follow [DEPLOY.md](DEPLOY.md). Begin with the read-only VPS inventory. New peer provisioning is disabled until the root-owned WireGuard configuration is set to match your actual interface, subnet and endpoint.
+
+See [MONITORING.md](MONITORING.md) for monitoring existing tunnels in preview and enabling the master firewalld switch.
 
 For a Windows PC, follow [WINDOWS.md](WINDOWS.md) or expand **Windows setup · start here** on the WireGuard hosts page. The panel includes the official download link and a copy-settings flow for **Add Empty Tunnel**.
 
@@ -45,7 +49,11 @@ Open http://localhost:8787. Preview mode saves entries but does not change forwa
 
 ## Scope
 
-This version supports TCP forwarding and TCP firewall allowances within a reserved range. UDP forwarding, arbitrary system firewall editing and automatic DigitalOcean Cloud Firewall management are not implemented. Existing NGINX Proxy Manager website routes remain in place. UNM uses existing WireGuard interfaces; it does not create a new VPS interface or change its private key.
+Public ports remain restricted to the configured pool of at most 200 ports. A forwarding range such as 20000-20005 must map to an equal-sized destination range such as 8080-8085. TCP and UDP may use the same port independently. Arbitrary system firewall editing and automatic DigitalOcean Cloud Firewall management are not implemented. Existing NGINX Proxy Manager website routes remain in place. UNM uses existing WireGuard interfaces; it does not create a new VPS interface or change its private key.
+
+Traffic is sampled every 60 seconds and retained for 35 days. Collection begins at the first successful sample and persists across UNM restarts. It cannot reconstruct earlier daily history or traffic lost before a counter reset. Collection gaps are assigned to the day of the next sample. Overall means all WireGuard peers, including unregistered peers, not total VPS internet traffic. A recent handshake indicates tunnel activity, not application reachability. Idle tunnels may show red until they send traffic; PersistentKeepalive=25 helps maintain visibility.
+
+UDP sessions expire after 60 idle seconds and are bounded by max_connections per public port. Disabling a UDP rule closes its sessions. Firewalld stop/start changes the running service only, not its boot enablement. With the master switch off, forwarded listeners remain active and the VPS loses firewalld protection. Other firewalls, Docker rules and cloud firewall rules still apply.
 
 Disabling a forwarding rule stops new connections; existing sessions can continue until disconnect. Destination services see the VPS tunnel address rather than the original client address. Host firewalls must allow their destination service from the VPS.
 
