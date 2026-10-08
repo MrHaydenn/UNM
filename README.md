@@ -76,6 +76,6 @@ node --check web/app.js
 
 Tests cover login/CSRF/TOTP, forwarding conflicts and rollback, real TCP forwarding, firewall rule ownership, peer allocation and key handling, preservation of unmanaged peers, persistent peer changes, and WireGuard rollback. Linux helper tests run on Ubuntu in GitHub Actions. Your live WireGuard routes, firewall rules and DNS credentials still need validation on the VPS.
 
-Implementation uses an unprivileged host service with narrow root-owned helpers for firewalld and WireGuard. It does not mount the Docker socket. No host private keys appear in activity logs or later configuration retrieval.
+Implementation uses an unprivileged host service with narrow root-owned helpers for firewalld, WireGuard and the optional Caddy/BIND backends. It does not mount the Docker socket. No host private keys appear in activity logs or later configuration retrieval.
 
 References: [WireGuard quick start](https://www.wireguard.com/quickstart/), [Ubuntu wg-quick documentation](https://manpages.ubuntu.com/manpages/noble/man8/wg-quick.8.html), [firewalld commands](https://firewalld.org/documentation/man-pages/firewall-cmd.html), [Docker firewall behavior](https://docs.docker.com/engine/network/packet-filtering-firewalls/).

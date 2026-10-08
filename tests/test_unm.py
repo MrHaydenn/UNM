@@ -218,6 +218,11 @@ class ControlTests(unittest.TestCase):
             item = self.app.dns('media', False, 'admin', None)
             self.assertFalse(cf.call_args.args[2]['proxied'])
             self.assertEqual(item['dnsRecordId'], 'owned')
+        without_hostname=self.body()
+        without_hostname.pop('hostname')
+        retained=self.app.validate_server('media',without_hostname)
+        self.assertEqual(retained['hostname'],item['hostname'])
+        self.assertEqual(retained['dnsRecordId'],'owned')
         renamed = self.body(); renamed['hostname'] = 'new.hosts.example.com'
         with self.assertRaises(ValueError):
             self.app.validate_server('media', renamed)

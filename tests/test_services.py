@@ -61,12 +61,14 @@ class HelperTests(unittest.TestCase):
             self.skipTest('Native config validators are required in Ubuntu CI')
         website=dict(domains=['site.example.com'],address='10.7.0.2',port=8080,scheme='http',ssl=True,enabled=True)
         self.helper.WEB.write_text(self.helper.web_text(self.cfg,[website]))
-        subprocess.run(['caddy','validate','--config',str(self.helper.WEB),'--adapter','caddyfile'],check=True,capture_output=True)
+        result=subprocess.run(['caddy','validate','--config',str(self.helper.WEB),'--adapter','caddyfile'],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         zone=self.cfg['dns_zones'][0]
         items=[record(dict(zone=zone,name='trigun',type='A',content='203.0.113.5',enabled=True),[zone]),record(dict(zone=zone,name='_minecraft._tcp.trigun',type='SRV',content='0 5 20080 trigun.minecraft.mrhaydenn.us',enabled=True),[zone]),record(dict(zone=zone,name='test',type='TXT',content='quoted "text" and \\ slash',enabled=True),[zone])]
         path=self.helper.DNS/(zone+'.zone');path.write_text(self.helper.zone_text(zone,self.cfg['nameservers'],self.cfg['public_ip'],items,123))
         conf=self.helper.DNS/'named.conf';conf.write_text(self.helper.dns_text(self.cfg))
-        subprocess.run(['named-checkzone',zone,str(path)],check=True,capture_output=True)
-        subprocess.run(['named-checkconf','-z',str(conf)],check=True,capture_output=True)
+        for args in (['named-checkzone',zone,str(path)],['named-checkconf','-z',str(conf)]):
+            result=subprocess.run(args,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         self.assertIn('recursion no',conf.read_text())
 
