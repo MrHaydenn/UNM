@@ -17,6 +17,8 @@ A focused web panel for an Ubuntu VPS: WireGuard hosts, TCP port forwarding, fir
 
 Follow [DEPLOY.md](DEPLOY.md). Begin with the read-only VPS inventory. New peer provisioning is disabled until the root-owned WireGuard configuration is set to match your actual interface, subnet and endpoint.
 
+For a Windows PC, follow [WINDOWS.md](WINDOWS.md) or expand **Windows setup · start here** on the WireGuard hosts page. The panel includes the official download link and a copy-settings flow for **Add Empty Tunnel**.
+
 For each new host, UNM prepares the VPS peer and returns a standard WireGuard configuration containing the host tunnel address, host private key, VPS public key, endpoint, tunnel routes and keepalive. Import it in WireGuard on Windows, or install it with wg-quick on Linux. Only the tunnel subnet is routed through the VPS. Your normal internet route remains unchanged.
 
 You can supply a public key generated on the host instead. The returned configuration then contains a private-key placeholder to replace on that host; its existing private key never needs to leave the host.

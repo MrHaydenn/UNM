@@ -1,5 +1,5 @@
 'use strict';
-let state, csrf = '', configurationName = '';
+let state, csrf = '', configurationName = '', configurationDownload = '';
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const endpoint = id => '/api/forwards/' + encodeURIComponent(id);
@@ -26,6 +26,7 @@ async function refresh() {
   }).join('') || empty('Add a host, then create your first forwarding rule.');
   const wg=state.wireguard;
   $('wg-status').textContent=wg.available?wg.interface+' · VPS tunnel '+wg.serverAddress+' · Endpoint '+wg.endpoint:wg.message;
+  $('windows-ready').textContent=wg.available?'Ready: UNM can configure a new peer on the VPS.':'Not ready to connect: '+wg.message+' Complete VPS setup and enable live mode before adding a new peer.';
   $('host-list').innerHTML=state.hosts.map(h=>{
     const peer=(wg.peers||[]).find(p=>p.publicKey===h.publicKey);
     const status=peer?.lastHandshake?'Last handshake '+new Date(peer.lastHandshake*1000).toLocaleString():(h.managed?'Waiting for first handshake':'Existing tunnel');
@@ -72,13 +73,18 @@ $('host-setup').onchange=setupMethod;
 $('new-host').onclick=()=>{const f=$('host-form');f.reset();f.hidden=false;setupMethod();f.scrollIntoView({behavior:'smooth',block:'center'});};
 $('cancel-host').onclick=()=>$('host-form').hidden=true;
 function showConfiguration(id, result) {
-  configurationName=id; $('config-text').value=result.configuration; $('host-config').hidden=false;
-  $('config-note').textContent=result.privateKeyIncluded?'Save this file now. Its private key is shown once and is not stored by UNM. Keep the file private.':'Replace <HOST_PRIVATE_KEY> with the private key already on this host. UNM does not retain host private keys.';
+  configurationName=id; configurationDownload=result.configuration; $('host-config').hidden=false;
+  $('config-text').value=result.privateKeyIncluded?result.configuration:result.configuration.replace(/^\[Interface\]\r?\nPrivateKey = <HOST_PRIVATE_KEY>\r?\n/, '');
+  $('config-note').textContent=result.privateKeyIncluded?'Save this file now. Its private key is shown once and is not stored by UNM. Keep the file private.':'Keep the [Interface] and PrivateKey lines already in your Windows empty tunnel. Paste the settings below after that private-key line. Your private key stays on your PC.';
+  $('copy-config').textContent=result.privateKeyIncluded?'Copy complete configuration':'Copy settings for empty tunnel';
+  $('download-config').textContent=result.privateKeyIncluded?'Download .conf':'Download template .conf';
+  $('config-windows-steps').textContent=result.privateKeyIncluded?'Windows: import the downloaded file using Add Tunnel → Import tunnel(s) from file. Or paste the complete configuration into an empty tunnel, replacing all its existing text. Save and activate.':'Windows: name the tunnel, paste these settings below the existing PrivateKey line, then Save → Activate. The downloadable template still needs your private key inserted locally before it can be imported.';
   $('host-config').scrollIntoView({behavior:'smooth',block:'center'});
 }
-function clearConfiguration() { $('config-text').value='';$('host-config').hidden=true;configurationName=''; }
+function clearConfiguration() { $('config-text').value='';$('host-config').hidden=true;configurationName='';configurationDownload=''; }
 $('close-config').onclick=clearConfiguration;
-$('download-config').onclick=()=>{const blob=new Blob([$('config-text').value],{type:'text/plain'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=configurationName+'.conf';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+$('copy-config').onclick=async()=>{try{await navigator.clipboard.writeText($('config-text').value);notice('Copied. Paste into WireGuard on your Windows PC.');}catch(error){$('config-text').focus();$('config-text').select();notice('The settings are selected. Press Ctrl+C to copy, then paste into WireGuard.');}};
+$('download-config').onclick=()=>{const blob=new Blob([configurationDownload],{type:'text/plain'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=configurationName+'.conf';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
 $('host-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{
   const f=e.target;const b=Object.fromEntries(new FormData(f));b.enroll=b.setup==='new';delete b.setup;
   const submit=f.querySelector('button');submit.disabled=true;
