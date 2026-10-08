@@ -3,7 +3,14 @@ let state, csrf = '', configurationName = '', configurationDownload = '';
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const endpoint = id => '/api/forwards/' + encodeURIComponent(id);
-function notice(message='') { $('notice').textContent = message; }
+function notice(message='') {
+  $('notice').textContent = message;
+  const hostForm=$('host-form');
+  let inline=$('host-error');
+  if(!inline){inline=document.createElement('p');inline.id='host-error';inline.setAttribute('role','alert');hostForm.appendChild(inline);}
+  inline.textContent=hostForm.hidden?'':message;
+  if(message && hostForm.hidden) $('notice').scrollIntoView({behavior:'smooth',block:'center'});
+}
 async function request(path, method='GET', body) {
   const response = await fetch(path, {method, headers:{'Content-Type':'application/json','X-CSRF-Token':csrf}, body:body === undefined ? undefined : JSON.stringify(body)});
   const data = await response.json();
