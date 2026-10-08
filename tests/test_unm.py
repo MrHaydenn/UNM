@@ -179,6 +179,17 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(sites[first['id']],edited)
         self.assertEqual(sites[second['id']],second)
 
+    def test_broad_public_port_range(self):
+        self.login()
+        self.app.cfg.update(port_min=1024,port_max=65535)
+        for port in (2456,8211,25565,32400,65535):
+            code,item=self.req('/api/forwards','POST',dict(self.body(),publicPort=port,hostname=''))
+            self.assertEqual(code,201)
+            self.assertEqual(item['publicPort'],port)
+        self.assertEqual(self.req('/api/forwards','POST',dict(self.body(),publicPort=99999))[0],400)
+        self.assertEqual(self.req('/api/forwards','POST',dict(self.body(),publicPort=80))[0],400)
+        self.assertEqual(self.req('/api/firewall','POST',dict(name='Valheim',port='2456-2458',protocol='both',enabled=True))[0],200)
+
     def test_failed_service_apply_keeps_saved_configuration(self):
         item=self.app.save_proxy(dict(name='My site',domains=['site.example.com'],hostId='pc',port=8080,scheme='http',ssl=True,enabled=True),'admin')
         with patch.object(self.app,'apply_services',side_effect=ValueError('reload failed')):

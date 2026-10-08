@@ -149,8 +149,8 @@ class App(Networking, Traffic, Services):
         c = self.cfg
         if c['mode'] not in ('preview', 'live'):
             raise ValueError('mode must be preview or live')
-        if not 1024 <= c['port_min'] <= c['port_max'] <= 65535 or c['port_max'] - c['port_min'] > 199:
-            raise ValueError('Reserved range must contain at most 200 unprivileged ports')
+        if not 1024 <= c['port_min'] <= c['port_max'] <= 65535:
+            raise ValueError('Managed public ports must be between 1024 and 65535')
         ipaddress.ip_network(c['wireguard_subnet'])
         if c['secure_cookie'] and not c['origin'].startswith('https://'):
             raise ValueError('Secure cookies require an HTTPS origin')

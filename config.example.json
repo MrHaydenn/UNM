@@ -9,8 +9,8 @@
   "public_ip": "",
   "dns_suffix": "hosts.example.com",
   "cloudflare_zone_id": "",
-  "port_min": 20000,
-  "port_max": 20099,
+  "port_min": 1024,
+  "port_max": 65535,
   "firewall_zone": "public",
   "max_connections": 256
 }
