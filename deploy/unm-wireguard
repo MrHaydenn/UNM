@@ -120,7 +120,21 @@ def execute(cfg, request):
         status = live_status(changed)
         if CONFIG.is_symlink(): fail('Symlinked provisioning settings are not supported')
         write_config(BASE / ('settings-' + str(time.time_ns()) + '.json'), json.dumps(cfg,indent=2)+'\n')
-        write_config(CONFIG, json.dumps(changed,indent=2)+'\n')
+        # Only this file is writable in systemd; replacing it needs directory access.
+        # Hold the helper lock and retain the private backup before writing.
+        with CONFIG.open('r+', encoding='utf-8') as stream:
+            try:
+                stream.write(json.dumps(changed, indent=2)+'\n')
+                stream.truncate()
+                stream.flush()
+                os.fsync(stream.fileno())
+            except Exception:
+                stream.seek(0)
+                stream.write(json.dumps(cfg, indent=2)+'\n')
+                stream.truncate()
+                stream.flush()
+                os.fsync(stream.fileno())
+                raise
         return status
     if not cfg.get('enabled') and request.get('action') != 'monitor':
         fail('Peer provisioning is disabled. Configure /etc/unm/wireguard.json on the VPS first.')
@@ -217,6 +231,17 @@ def main():
         print(json.dumps(result))
     except ValueError as exc:
         print(str(exc) if str(exc).startswith('UNM: ') else 'UNM: Invalid configuration or request', file=sys.stderr)
+        raise SystemExit(1)
+    except OSError as exc:
+        if exc.errno == 30:
+            message = 'UNM: Provisioning settings are read-only in the service sandbox; update UNM service permissions and restart it'
+        elif exc.errno == 13:
+            message = 'UNM: Permission denied accessing provisioning files; inspect VPS file permissions'
+        elif exc.errno == 2:
+            message = 'UNM: Required provisioning file or command is missing; inspect VPS setup'
+        else:
+            message = 'UNM: WireGuard filesystem operation failed; inspect VPS setup'
+        print(message, file=sys.stderr)
         raise SystemExit(1)
     except Exception:
         print('UNM: WireGuard operation failed; inspect the configured interface and file', file=sys.stderr)

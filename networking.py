@@ -81,7 +81,7 @@ class Networking:
             if self.cfg['mode'] != 'live':
                 raise ValueError('Panel is in preview mode; enable live mode on the VPS first')
             if not status.get('provisioningEnabled', True):
-                raise ValueError('WireGuard provisioning is disabled; enable it in Settings. The panel is already in live mode.')
+                raise ValueError('WireGuard provisioning is disabled; enable it on the WireGuard hosts page. The panel is already in live mode.')
             public = body.get('publicKey', '').strip()
             if public:
                 valid_key(public)
