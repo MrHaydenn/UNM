@@ -136,3 +136,28 @@ Get-Item "$env:USERPROFILE\.ssh\unm_mmsm" | Select-Object -ExpandProperty FullNa
 
 Use the private file without `.pub`, and the VPS account whose authorized_keys
 contains its public key (in the documented setup, `root`).
+
+
+### Public UNM panel with HTTPS on port 8787
+
+Create a Cloudflare **DNS-only** A record `unm` pointing to the VPS IPv4 address.
+Keep it DNS-only: the standard Cloudflare proxy does not support HTTPS port 8787.
+After updating UNM, explicitly enable the public panel:
+
+```bash
+sudo bash /opt/unm/deploy/setup-public-panel.sh
+```
+
+This backs up the existing configuration, validates the generated Caddy configuration,
+preserves saved websites, enables live mode, and sets the browser origin and secure
+cookies for **https://unm.mrhaydenn.us:8787**. Caddy handles automatic production
+certificates and listens publicly on TCP 8787; UNM itself moves to loopback port 8786.
+The configured panel is retained whenever UNM regenerates website configuration.
+Ensure any DigitalOcean cloud firewall allows inbound TCP 8787. Ports 80 and 443
+must remain reachable for Let's Encrypt validation. Login credentials stay unchanged.
+A previously configured browser SSH tunnel to backend port 8787 must be closed;
+use the public HTTPS address instead.
+
+In MMSM, disable automatic SSH, set UNM URL to `https://unm.mrhaydenn.us:8787`,
+keep the integration token, and save settings before testing the connection.
+The private SSH key field is no longer needed for this connection.

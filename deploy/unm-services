@@ -55,6 +55,14 @@ def web_text(cfg, items):
         raise ValueError('UNM: Duplicate website domain')
     ca='https://acme-staging-v02.api.letsencrypt.org/directory' if cfg.get('staging') else 'https://acme-v02.api.letsencrypt.org/directory'
     text='# Managed by UNM\n{\n admin unix//run/unm-caddy/admin.sock\n}\n'
+    panel = cfg.get('public_panel')
+    if panel:
+        hostname = domain(panel['domain'])
+        if panel.get('port') != 8787 or panel.get('backend_port') != 8786:
+            raise ValueError('UNM: Public panel uses HTTPS 8787 and loopback backend 8786')
+        if hostname in domains:
+            raise ValueError('UNM: Public panel domain is reserved; remove its website entry')
+        text += '\nhttps://' + hostname + ':8787 {\n tls {\n  issuer acme {\n   dir ' + ca + '\n   email ' + email + '\n  }\n }\n reverse_proxy 127.0.0.1:8786\n}\n'
     for r in validated:
         if not r['enabled']:
             continue

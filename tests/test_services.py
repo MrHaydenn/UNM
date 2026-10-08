@@ -48,6 +48,20 @@ class HelperTests(unittest.TestCase):
 
     def tearDown(self):self.tmp.cleanup()
 
+    def test_public_panel_https_and_reserved_domain(self):
+        cfg = dict(self.cfg, public_panel={'domain': 'unm.mrhaydenn.us', 'port': 8787, 'backend_port': 8786})
+        text = self.helper.web_text(cfg, [])
+        self.assertIn('https://unm.mrhaydenn.us:8787 {', text)
+        self.assertIn('reverse_proxy 127.0.0.1:8786', text)
+        with self.assertRaises(ValueError):
+            self.helper.web_text(dict(cfg, public_panel=dict(cfg['public_panel'], backend_port=22)), [])
+        website = dict(domains=['unm.mrhaydenn.us'],address='10.7.0.2',port=8080,scheme='http',ssl=True,enabled=True)
+        with self.assertRaises(ValueError):
+            self.helper.web_text(cfg, [website])
+        if shutil.which('caddy'):
+            self.helper.WEB.write_text(text)
+            subprocess.run(['caddy', 'validate', '--config', str(self.helper.WEB), '--adapter', 'caddyfile'], check=True, capture_output=True)
+
     def test_disabled_gate_and_transactional_rollback(self):
         with self.assertRaises(ValueError):self.helper.execute(dict(self.cfg,web_enabled=False),dict(action='web',items=[]))
         path=self.helper.WEB;path.write_text('previous')
