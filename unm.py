@@ -25,6 +25,7 @@ from networking import Networking
 from ports import port_range, protocols, sockets, label
 from udp_proxy import UDPProxy
 from traffic import Traffic
+from services import Services
 
 ROOT = Path(__file__).resolve().parent
 LOCK = threading.RLock()
@@ -142,7 +143,7 @@ class Proxy:
         asyncio.run_coroutine_threadsafe(self.reconcile(entries), self.loop).result(20)
 
 
-class App(Networking, Traffic):
+class App(Networking, Traffic, Services):
     def __init__(self, config):
         self.cfg = json.loads(Path(config).read_text())
         c = self.cfg
@@ -184,6 +185,7 @@ class App(Networking, Traffic):
         self.db.execute('DELETE FROM firewall_rules')
         self.db.commit()
         self.init_traffic()
+        self.init_services()
         self.sessions, self.attempts, self.otp_used = {}, {}, {}
         self.proxy = Proxy(c) if c['mode'] == 'live' else None
 
@@ -239,7 +241,8 @@ class App(Networking, Traffic):
             raise ValueError('Public port is outside the reserved range')
         if type(body.get('enabled')) is not bool:
             raise ValueError('enabled must be true or false')
-        hostname = body.get('hostname', '').lower().rstrip('.')
+        old = next((r for r in self.servers() if r['id'] == sid), None)
+        hostname = body.get('hostname', (old or {}).get('hostname','')).lower().rstrip('.')
         suffix = self.cfg['dns_suffix'].lower().rstrip('.')
         if hostname and (not hostname.endswith('.' + suffix) or len(hostname) > 253 or
                          any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', p) for p in hostname.split('.'))):
@@ -418,6 +421,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, dict(user=actor, csrf=session['csrf'], hosts=app.hosts(), forwards=app.servers(),
                                       firewallRules=app.firewall_rules(), wireguard=app.wg_status(),
                                       firewall=app.firewall_state(),traffic=app.traffic_summary(30),
+                                      websites=app.proxy_hosts(),dnsRecords=app.dns_records(),services=app.services_status(),
                                       mode=app.cfg['mode'], portMin=app.cfg['port_min'], portMax=app.cfg['port_max'],
                                       subnet=app.cfg['wireguard_subnet'], dnsSuffix=app.cfg['dns_suffix'],
                                       audit=[dict(r) for r in app.db.execute('SELECT * FROM audit ORDER BY rowid DESC LIMIT 40')]))
@@ -438,8 +442,22 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('Configuration is available for managed hosts only')
                 return self.send(200, dict(configuration=app.host_config(host, app.wg_status()), privateKeyIncluded=False))
         if path == '/api/firewall' and self.command == 'POST':
-            app.save_firewall_rule(self.read_body(), actor)
+            body=self.read_body()
+            body['id']=body.get('id') or 'rule-'+secrets.token_hex(8)
+            app.save_firewall_rule(body, actor)
             return self.send(200, {'ok': True})
+        if path == '/api/forwards' and self.command == 'POST':
+            body=self.read_body()
+            return self.send(201,app.save_server('forward-'+secrets.token_hex(8),body,actor))
+        if path in ('/api/websites','/api/dns-records') and self.command=='POST':
+            item=app.save_proxy(self.read_body(),actor) if path=='/api/websites' else app.save_dns(self.read_body(),actor)
+            return self.send(200,item)
+        if path in ('/api/websites/apply','/api/dns-records/apply') and self.command=='POST':
+            app.apply_services('web' if path.startswith('/api/websites') else 'dns',app.proxy_hosts() if path.startswith('/api/websites') else app.dns_records())
+            return self.send(200,dict(ok=True,preview=app.cfg['mode']=='preview'))
+        if len(parts)==3 and parts[1] in ('websites','dns-records') and parts[0]=='api' and self.command=='DELETE':
+            app.delete_service_item('web' if parts[1]=='websites' else 'dns',valid_id(parts[2]),actor)
+            return self.send(200,dict(ok=True))
         if path == '/api/firewall/service' and self.command == 'POST':
             app.set_firewall_enabled(self.read_body().get('enabled'),actor)
             return self.send(200, {'ok':True})

@@ -21,6 +21,10 @@ if [[ -f /usr/local/sbin/unm-wireguard ]]; then
 fi
 cp -a /etc/systemd/system/unm.service "$backup/service"
 cp -a /etc/sudoers.d/unm "$backup/sudoers"
+if [[ -f /usr/local/sbin/unm-services ]]; then
+  cp -a /usr/local/sbin/unm-services "$backup/services-helper"
+  cp -a /usr/local/lib/unm/service_schema.py "$backup/services-schema"
+fi
 rollback() {
   echo 'Update failed. Restoring the previous commit and configuration.'
   git checkout --detach "$old"
@@ -32,6 +36,10 @@ rollback() {
   fi
   cp -a "$backup/service" /etc/systemd/system/unm.service
   cp -a "$backup/sudoers" /etc/sudoers.d/unm
+  if [[ -f "$backup/services-helper" ]]; then
+    cp -a "$backup/services-helper" /usr/local/sbin/unm-services
+    cp -a "$backup/services-schema" /usr/local/lib/unm/service_schema.py
+  fi
   systemctl daemon-reload
   systemctl start unm || true
   echo "Backup: $backup. Inspect journalctl -u unm."

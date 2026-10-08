@@ -13,6 +13,9 @@ A focused web panel for an Ubuntu VPS: WireGuard hosts, TCP/UDP port forwarding,
 - Tunnel status indicators use recent handshakes: green within 180 seconds, red otherwise, gray when unavailable.
 - Persistent traffic totals for today, the last seven days and the last 30 days, with daily UTC totals and average receive/send rates per peer and overall.
 - Optional DNS-only A records through your existing Cloudflare account.
+- Website proxy hosts through tunnel addresses, automatic Let's Encrypt SSL/renewal with Caddy, and stored certificate expiry.
+- Authoritative BIND9 DNS zones with A/AAAA/CNAME/TXT/SRV records and Cloudflare subdomain delegation instructions.
+- Rule identifiers are generated internally; forwarding/firewall forms only require friendly names. Website domains and DNS records have their own pages.
 - Preview mode and a backed-up GitHub update workflow.
 
 ## Setup
@@ -20,6 +23,8 @@ A focused web panel for an Ubuntu VPS: WireGuard hosts, TCP/UDP port forwarding,
 Follow [DEPLOY.md](DEPLOY.md). Begin with the read-only VPS inventory. New peer provisioning is disabled until the root-owned WireGuard configuration is set to match your actual interface, subnet and endpoint.
 
 See [MONITORING.md](MONITORING.md) for monitoring existing tunnels in preview and enabling the master firewalld switch.
+
+See [WEBSITE-DNS.md](WEBSITE-DNS.md) for the optional website/SSL and authoritative DNS backends. Updating leaves both disabled, and does not stop NPM or change Cloudflare records. This first version does not include custom/wildcard certificates or every advanced NPM feature.
 
 For a Windows PC, follow [WINDOWS.md](WINDOWS.md) or expand **Windows setup · start here** on the WireGuard hosts page. The panel includes the official download link and a copy-settings flow for **Add Empty Tunnel**.
 

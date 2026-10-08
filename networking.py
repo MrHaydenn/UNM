@@ -113,7 +113,7 @@ class Networking:
         return dict(host=host, configuration=config, privateKeyIncluded=bool(private))
 
     def remove_host(self, hid, actor):
-        if any(f['hostId'] == hid for f in self.servers()):
+        if any(f['hostId'] == hid for f in self.servers()+self.proxy_hosts()):
             raise ValueError('Delete this host’s forwarding routes first')
         host = next((h for h in self.hosts() if h['id'] == hid), None)
         if not host:

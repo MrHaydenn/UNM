@@ -1,0 +1,192 @@
+#!/usr/bin/python3 -I
+"""Root-owned Caddy/BIND helper: structured inputs, fixed paths and service names."""
+import fcntl
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import ssl
+import subprocess
+import sys
+import time
+
+sys.path.insert(0,'/usr/local/lib/unm')  # Installed root-owned code, never the writable checkout.
+from service_schema import domain, proxy, record, validate_records
+
+BASE=Path('/var/lib/unm-services')
+CONFIG=Path('/etc/unm/services.json')
+WEB=Path('/etc/caddy/unm/Caddyfile')
+DNS=Path('/etc/bind/unm')
+CERTS=Path('/var/lib/caddy/data/caddy/certificates')
+WIREGUARD=Path('/etc/unm/wireguard.json')
+
+
+def command(args):
+    env=dict(os.environ,XDG_DATA_HOME='/var/lib/caddy/data',XDG_CONFIG_HOME='/var/lib/caddy/config')
+    result=subprocess.run(args,capture_output=True,text=True,timeout=35,env=env)
+    if result.returncode:
+        raise ValueError('UNM: Configuration validation or reload failed; inspect Caddy/BIND logs')
+    return result.stdout
+
+
+def running(service):
+    return subprocess.run(['/usr/bin/systemctl','is-active','--quiet',service],capture_output=True,timeout=5).returncode==0
+
+
+def settings(cfg):
+    names=[domain(n) for n in cfg.get('nameservers',[])]
+    zones=[domain(n) for n in cfg.get('dns_zones',[])]
+    if not 1<=len(names)<=4 or len(set(names))!=len(names) or not 1<=len(zones)<=10:
+        raise ValueError('UNM: Configure 1–4 unique nameservers and 1–10 zones')
+    address=str(ipaddress.IPv4Address(cfg['public_ip']))
+    email=cfg.get('email','')
+    if not re.fullmatch(r'[a-zA-Z0-9_.+%-]+@[a-zA-Z0-9.-]+',email):
+        raise ValueError('UNM: Configure a certificate contact email')
+    return zones,names,address,email
+
+
+def web_text(cfg, items):
+    _,_,_,email=settings(cfg)
+    subnet=json.loads(WIREGUARD.read_text())['subnet']
+    validated=[proxy(r,subnet) for r in items]
+    domains=[name for r in validated for name in r['domains']]
+    if len(domains)!=len(set(domains)):
+        raise ValueError('UNM: Duplicate website domain')
+    ca='https://acme-staging-v02.api.letsencrypt.org/directory' if cfg.get('staging') else 'https://acme-v02.api.letsencrypt.org/directory'
+    text='# Managed by UNM\n{\n admin unix//run/unm-caddy/admin.sock\n}\n'
+    for r in validated:
+        if not r['enabled']:
+            continue
+        text+='\n'+', '.join(('https://' if r['ssl'] else 'http://')+n for n in r['domains'])+' {\n'
+        if r['ssl']:
+            text+=' tls {\n  issuer acme {\n   ca '+ca+'\n   email '+email+'\n  }\n }\n'
+        text+=' reverse_proxy '+r['scheme']+'://'+r['address']+':'+str(r['port'])+'\n}\n'
+    return text
+
+
+def zone_text(zone,names,public,items,serial):
+    text='$ORIGIN '+zone+'.\n$TTL 300\n@ IN SOA '+names[0]+'. hostmaster.'+zone+'. ('+str(serial)+' 3600 600 1209600 300)\n'
+    for name in names:
+        text+='@ IN NS '+name+'.\n'
+        if name.endswith('.'+zone):
+            text+=name+'. IN A '+public+'\n'
+    for r in items:
+        if r['zone']!=zone or not r['enabled']:
+            continue
+        if r['name'] in names and r['name'].endswith('.'+zone):
+            raise ValueError('UNM: In-zone nameserver addresses are managed by server settings')
+        content=r['content']
+        if r['type']=='TXT':
+            content='"'+content.replace('\\','\\\\').replace('"','\\"')+'"'
+        text+=r['name']+'. '+str(r['ttl'])+' IN '+r['type']+' '+content+'\n'
+    return text
+
+
+def dns_text(cfg):
+    zones,_,public,_=settings(cfg)
+    text='// Managed by UNM\noptions {\n directory "/var/cache/bind";\n pid-file "/run/named/named.pid";\n session-keyfile "/run/named/session.key";\n listen-on port 53 { '+public+'; };\n listen-on-v6 { none; };\n recursion no;\n allow-query { any; };\n allow-query-cache { none; };\n allow-transfer { none; };\n allow-update { none; };\n dnssec-validation no;\n minimal-responses yes;\n rate-limit { responses-per-second 10; };\n};\ncontrols {};\n'
+    for zone in zones:
+        text+='zone "'+zone+'" { type master; file "'+str(DNS / (zone+'.zone'))+'"; notify no; };\n'
+    return text
+
+
+def write(path,text):
+    if path.is_symlink():
+        raise ValueError('UNM: Symlinked managed files are not supported')
+    temp=path.with_name(path.name+'.tmp')
+    fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o644)
+    with os.fdopen(fd,'w',encoding='utf-8') as stream:
+        stream.write(text);stream.flush();os.fsync(stream.fileno())
+    temp.replace(path)
+
+
+def apply_files(files,validate,service):
+    previous={p:p.read_text() if p.exists() else None for p in files}
+    backup=BASE/('backup-'+str(time.time_ns()))
+    backup.mkdir(mode=0o700)
+    (backup/'files.json').write_text(json.dumps({str(p):v for p,v in previous.items()}))
+    try:
+        for path,text in files.items():
+            write(path,text)
+        validate()
+        command(['/usr/bin/systemctl','reload',service])
+    except Exception:
+        for path,text in previous.items():
+            if text is None:
+                path.unlink(missing_ok=True)
+            else:
+                write(path,text)
+        try:
+            command(['/usr/bin/systemctl','reload',service])
+        except Exception:
+            raise ValueError('UNM: Apply and reload rollback failed; inspect backend via SSH') from None
+        raise
+
+
+def execute(cfg,body):
+    action=body.get('action')
+    if action=='status':
+        certificates=[]
+        for cert in CERTS.glob('*/*/*.crt'):
+            try:
+                info=ssl._ssl._test_decode_cert(str(cert))
+                certificates.append(dict(domains=[v for k,v in info.get('subjectAltName',[]) if k=='DNS'],expires=info['notAfter']))
+            except (ValueError,ssl.SSLError,OSError):
+                continue
+        return dict(webEnabled=cfg.get('web_enabled') is True,dnsEnabled=cfg.get('dns_enabled') is True,
+                    webRunning=running('unm-caddy'),dnsRunning=running('unm-dns'),zones=cfg.get('dns_zones',[]),nameservers=cfg.get('nameservers',[]),
+                    publicIP=cfg.get('public_ip',''),staging=bool(cfg.get('staging')),certificates=certificates)
+    if action not in ('web','dns') or cfg.get(action+'_enabled') is not True:
+        raise ValueError('UNM: Backend is disabled. Complete WEBSITE-DNS.md setup before enabling live changes')
+    items=body.get('items')
+    if not isinstance(items,list) or len(items)>(100 if action=='web' else 1000):
+        raise ValueError('UNM: Too many entries or invalid list')
+    if action=='web':
+        text=web_text(cfg,items)
+        if any(r.get('enabled') for r in items) and not running('unm-caddy'):
+            raise ValueError('UNM: Start unm-caddy after releasing ports 80/443')
+        apply_files({WEB:text},lambda:command(['/usr/bin/caddy','validate','--config',str(WEB),'--adapter','caddyfile']),'unm-caddy')
+    else:
+        zones,names,public,_=settings(cfg)
+        items=[record(r,zones) for r in items]
+        validate_records(items)
+        if not running('unm-dns'):
+            raise ValueError('UNM: Start unm-dns after releasing public port 53')
+        serial_path=BASE/'serial'
+        serial=max(int(time.time()),int(serial_path.read_text())+1 if serial_path.exists() else 1)
+        if serial>=2**32:
+            raise ValueError('UNM: DNS serial is out of range')
+        serial_path.write_text(str(serial))  # Never reuse a serial, including after failed applies.
+        files={DNS/(z+'.zone'):zone_text(z,names,public,items,serial) for z in zones}
+        files[DNS/'named.conf']=dns_text(cfg)
+        def validate():
+            for zone in zones:
+                command(['/usr/bin/named-checkzone',zone,str(DNS/(zone+'.zone'))])
+            command(['/usr/bin/named-checkconf',str(DNS/'named.conf')])
+        apply_files(files,validate,'unm-dns')
+    return dict(ok=True)
+
+
+def main():
+    try:
+        if os.geteuid()!=0:
+            raise ValueError('UNM: Root required')
+        cfg=json.loads(CONFIG.read_text())
+        raw=sys.stdin.read(1048577)
+        if len(raw)>1048576:
+            raise ValueError('UNM: Request too large')
+        body=json.loads(raw)
+        if not isinstance(body,dict):
+            raise ValueError('UNM: Invalid request')
+        with (BASE/'lock').open('w') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX)
+            print(json.dumps(execute(cfg,body)))
+    except Exception as exc:
+        message=str(exc)
+        print(message if message.startswith('UNM: ') else 'UNM: Invalid website/DNS configuration or request',file=sys.stderr)
+        raise SystemExit(1)
+
+
+if __name__=='__main__':
+    main()

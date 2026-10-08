@@ -146,6 +146,30 @@ class ControlTests(unittest.TestCase):
         self.assertFalse(self.req('/api/state')[1]['firewall']['enabled'])
         self.assertEqual(self.req('/api/traffic?days=7')[0], 200)
 
+    def test_website_dns_and_generated_rule_ids(self):
+        self.login()
+        code,item=self.req('/api/forwards','POST',dict(self.body(),name='Named forward'))
+        self.assertEqual(code,201);self.assertTrue(item['id'].startswith('forward-'))
+        self.assertEqual(self.req('/api/firewall','POST',dict(name='Named rule',port=20090,enabled=True))[0],200)
+        website=dict(name='My site',domains=['site.example.com'],hostId='pc',port=8080,scheme='http',ssl=True,enabled=True)
+        code,site=self.req('/api/websites','POST',website)
+        self.assertEqual(code,200)
+        self.assertEqual(self.req('/api/websites','POST',website)[0],400)
+        self.assertEqual(self.req('/api/hosts/pc','DELETE')[0],400)
+        with patch.object(self.app,'services_status',return_value=dict(zones=['minecraft.mrhaydenn.us'])):
+            body=dict(zone='minecraft.mrhaydenn.us',name='trigun',type='A',content='203.0.113.5',ttl=300,enabled=True)
+            code,dns=self.req('/api/dns-records','POST',body)
+            self.assertEqual(code,200)
+            self.assertEqual(self.req('/api/dns-records','POST',body)[0],400)
+            self.assertEqual(self.req('/api/dns-records/'+dns['id'],'DELETE')[0],200)
+        self.assertEqual(self.req('/api/websites/'+site['id'],'DELETE')[0],200)
+
+    def test_failed_service_apply_keeps_saved_configuration(self):
+        item=self.app.save_proxy(dict(name='My site',domains=['site.example.com'],hostId='pc',port=8080,scheme='http',ssl=True,enabled=True),'admin')
+        with patch.object(self.app,'apply_services',side_effect=ValueError('reload failed')):
+            with self.assertRaises(ValueError):self.app.save_proxy(dict(item,port=8090),'admin')
+        self.assertEqual(self.app.proxy_hosts()[0]['port'],8080)
+
     def test_traffic_deltas_reset_and_retained_baseline(self):
         now=time.time()
         def sample(rx, tx, boot='first'):

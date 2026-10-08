@@ -27,6 +27,8 @@ install -d -m 750 -o root -g unm /etc/unm
 install -d -m 700 -o unm -g unm /var/lib/unm
 install -d -m 700 -o root -g root /var/lib/unm-firewall
 install -d -m 700 -o root -g root /var/lib/unm-wireguard
+install -d -m 700 -o root -g root /var/lib/unm-services
+install -d -m 755 -o root -g root /usr/local/lib/unm
 install -d -m 700 -o root -g root /etc/wireguard
 if [[ ! -f /etc/unm/config.json ]]; then
   python3 - <<'PY'
@@ -62,7 +64,19 @@ fi
 chmod 600 /etc/unm/wireguard.json
 install -m 755 -o root -g root /opt/unm/deploy/unm-firewall /usr/local/sbin/unm-firewall
 install -m 755 -o root -g root /opt/unm/deploy/unm-wireguard /usr/local/sbin/unm-wireguard
-printf 'unm ALL=(root) NOPASSWD: /usr/local/sbin/unm-firewall "", /usr/local/sbin/unm-wireguard ""\n' >/etc/sudoers.d/unm
+install -m 755 -o root -g root /opt/unm/deploy/unm-services /usr/local/sbin/unm-services
+install -m 644 -o root -g root /opt/unm/service_schema.py /usr/local/lib/unm/service_schema.py
+if [[ ! -f /etc/unm/services.json ]]; then
+  python3 - <<'PY'
+import json
+from pathlib import Path
+c=json.loads(Path('/etc/unm/config.json').read_text())
+settings=dict(web_enabled=False,dns_enabled=False,staging=True,email='YOUR_EMAIL',public_ip=c.get('public_ip',''),dns_zones=['minecraft.mrhaydenn.us'],nameservers=['ns1.mrhaydenn.us'])
+Path('/etc/unm/services.json').write_text(json.dumps(settings,indent=2)+'\n')
+PY
+fi
+chmod 600 /etc/unm/services.json
+printf 'unm ALL=(root) NOPASSWD: /usr/local/sbin/unm-firewall "", /usr/local/sbin/unm-wireguard "", /usr/local/sbin/unm-services ""\n' >/etc/sudoers.d/unm
 chmod 440 /etc/sudoers.d/unm
 visudo -cf /etc/sudoers.d/unm
 install -m 644 /opt/unm/deploy/unm.service /etc/systemd/system/unm.service

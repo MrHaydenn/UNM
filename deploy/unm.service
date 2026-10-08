@@ -17,6 +17,7 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/var/lib/unm /var/lib/unm-firewall /var/lib/unm-wireguard /etc/wireguard
+ReadWritePaths=/var/lib/unm-services -/etc/caddy/unm -/etc/bind/unm -/var/lib/caddy
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 TimeoutStopSec=15
 
