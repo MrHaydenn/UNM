@@ -29,7 +29,7 @@ from traffic import Traffic
 from services import Services
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 LOCK = threading.RLock()
 LOG = logging.getLogger('unm')
 
@@ -447,7 +447,7 @@ class Handler(BaseHTTPRequestHandler):
             body = self.read_body()
             return self.send(200, app.wg_call({'action':'configure','endpoint':body.get('endpoint','')}))
         if path == '/api/state'  and self.command == 'GET':
-            return self.send(200, dict(user=actor, version=VERSION, csrf=session['csrf'], hosts=app.hosts(), forwards=app.servers(),
+            return self.send(200, dict(user=actor, version=VERSION, cloudflare=app.cloudflare_website_status(), csrf=session['csrf'], hosts=app.hosts(), forwards=app.servers(),
                                       firewallRules=app.firewall_rules(), wireguard=app.wg_status(),
                                       firewall=app.firewall_state(),traffic=app.traffic_summary(30),
                                       websites=app.proxy_hosts(),dnsRecords=app.dns_records(),services=app.services_status(),integrationKeys=app.integration_keys(),
@@ -483,6 +483,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200,item)
         if path in ('/api/websites/apply','/api/dns-records/apply') and self.command=='POST':
             app.apply_services('web' if path.startswith('/api/websites') else 'dns',app.proxy_hosts() if path.startswith('/api/websites') else app.dns_records())
+            if path == '/api/websites/apply':
+                for website in app.proxy_hosts():
+                    app.publish_website_dns(website)
             return self.send(200,dict(ok=True,preview=app.cfg['mode']=='preview'))
         if len(parts)==3 and parts[1] in ('websites','dns-records') and parts[0]=='api' and self.command=='DELETE':
             app.delete_service_item('web' if parts[1]=='websites' else 'dns',valid_id(parts[2]),actor)

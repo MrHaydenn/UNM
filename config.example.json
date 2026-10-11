@@ -12,5 +12,6 @@
   "port_min": 1024,
   "port_max": 65535,
   "firewall_zone": "public",
-  "max_connections": 256
+  "max_connections": 256,
+  "cloudflare_zone_name": ""
 }
