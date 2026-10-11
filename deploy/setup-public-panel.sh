@@ -2,6 +2,14 @@
 # Explicitly enable public HTTPS. Keeps the application HTTP listener on loopback.
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo 'Run with sudo bash /opt/unm/deploy/setup-public-panel.sh'; exit 1; }
+[[ $# -eq 1 ]] || { echo 'Usage: sudo bash /opt/unm/deploy/setup-public-panel.sh YOUR_PANEL_DOMAIN'; exit 1; }
+export UNM_PANEL_DOMAIN="$1"
+python3 - <<'PY'
+import os, re
+value=os.environ['UNM_PANEL_DOMAIN']
+if len(value)>253 or not re.fullmatch(r'(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}',value):
+    raise SystemExit('Enter a lowercase domain name, without https://, a path or port.')
+PY
 [[ -f /etc/caddy/unm/Caddyfile && -f /etc/unm/services.json ]] || { echo 'Set up Caddy services first.'; exit 1; }
 systemctl is-active --quiet unm-caddy || { echo 'Start unm-caddy first.'; exit 1; }
 backup="/var/backups/unm/public-panel-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -21,6 +29,7 @@ rollback() {
 trap rollback ERR
 systemctl stop unm
 python3 - <<'PY'
+import os
 import importlib.machinery
 import importlib.util
 import json
@@ -33,7 +42,8 @@ helper=importlib.util.module_from_spec(spec);loader.exec_module(helper)
 config_path=Path('/etc/unm/config.json')
 config=json.loads(config_path.read_text())
 services=json.loads(helper.CONFIG.read_text())
-services['public_panel']={'domain':'unm.mrhaydenn.us','port':8787,'backend_port':8786}
+panel_domain=os.environ['UNM_PANEL_DOMAIN']
+services['public_panel']={'domain':panel_domain,'port':8787,'backend_port':8786}
 services['web_enabled']=True
 services['staging']=False
 with sqlite3.connect(str(Path(config['data_dir'])/'unm.sqlite')) as db:
@@ -47,7 +57,7 @@ try:
     subprocess.run(['caddy','validate','--config',str(candidate),'--adapter','caddyfile'],check=True)
 finally:
     candidate.unlink(missing_ok=True)
-config.update(bind='127.0.0.1',port=8786,origin='https://unm.mrhaydenn.us:8787',secure_cookie=True,mode='live')
+config.update(bind='127.0.0.1',port=8786,origin='https://'+panel_domain+':8787',secure_cookie=True,mode='live')
 config_path.write_text(json.dumps(config,indent=2)+'\n')
 helper.CONFIG.write_text(json.dumps(services,indent=2)+'\n')
 helper.write(helper.WEB,text)
@@ -64,6 +74,6 @@ systemctl enable unm unm-caddy
 curl --fail --silent --noproxy '*' http://127.0.0.1:8786/healthz
 trap - ERR
 echo
-echo "Public panel: https://unm.mrhaydenn.us:8787"
+echo "Public panel: https://${UNM_PANEL_DOMAIN}:8787"
 echo "Allow TCP 8787 in the DigitalOcean firewall if attached. Ports 80/443 must remain reachable for automatic certificates."
 echo "Backup: $backup"

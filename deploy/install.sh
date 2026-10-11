@@ -73,7 +73,7 @@ if [[ ! -f /etc/unm/services.json ]]; then
 import json
 from pathlib import Path
 c=json.loads(Path('/etc/unm/config.json').read_text())
-settings=dict(web_enabled=False,dns_enabled=False,staging=True,email='YOUR_EMAIL',public_ip=c.get('public_ip',''),dns_zones=['minecraft.mrhaydenn.us'],nameservers=['ns1.mrhaydenn.us'])
+settings=dict(web_enabled=False,dns_enabled=False,staging=True,email='YOUR_EMAIL',public_ip=c.get('public_ip',''),dns_zones=['minecraft.example.com'],nameservers=['ns1.example.com'])
 Path('/etc/unm/services.json').write_text(json.dumps(settings,indent=2)+'\n')
 PY
 fi
@@ -83,4 +83,4 @@ chmod 440 /etc/sudoers.d/unm
 visudo -cf /etc/sudoers.d/unm
 install -m 644 /opt/unm/deploy/unm.service /etc/systemd/system/unm.service
 systemctl daemon-reload
-echo 'Installed in preview mode. Edit /etc/unm/config.json, create your admin, then start unm.'
+echo 'Installed. Existing configuration was preserved. For a new install, edit /etc/unm/config.json, create your admin, then start unm.'

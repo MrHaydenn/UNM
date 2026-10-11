@@ -24,15 +24,15 @@ Edit `/etc/unm/services.json`, replacing YOUR_EMAIL with your contact email:
   "dns_enabled": false,
   "staging": true,
   "email": "YOUR_EMAIL",
-  "public_ip": "157.230.239.126",
-  "dns_zones": ["minecraft.mrhaydenn.us"],
-  "nameservers": ["ns1.mrhaydenn.us"]
+  "public_ip": "203.0.113.10",
+  "dns_zones": ["minecraft.example.com"],
+  "nameservers": ["ns1.example.com"]
 }
 ```
 
-Keep this root-owned and mode 600. Configure `/etc/unm/wireguard.json` to match wg0 and 10.7.0.0/24 as described in MONITORING.md. The privileged website helper restricts destinations to that root-configured tunnel subnet. A website's destination must be a registered host in the panel. Root settings authorize exactly which DNS zones can be managed. Do not remove or rename an active zone until its delegation has been moved away and its records migrated.
+Keep this root-owned and mode 600. Configure `/etc/unm/wireguard.json` to match wg0 and 10.8.0.0/24 as described in MONITORING.md. The privileged website helper restricts destinations to that root-configured tunnel subnet. A website's destination must be a registered host in the panel. Root settings authorize exactly which DNS zones can be managed. Do not remove or rename an active zone until its delegation has been moved away and its records migrated.
 
-One nameserver on one VPS is adequate for initial testing but has no redundancy. Use a second independent authoritative server before relying on DNS availability; this version does not configure replication or zone transfers automatically. Do not list a second nameserver unless it really serves the same zone. In-zone nameserver A records are generated automatically; nameservers such as ns1.mrhaydenn.us outside the delegated zone need their A record at Cloudflare.
+One nameserver on one VPS is adequate for initial testing but has no redundancy. Use a second independent authoritative server before relying on DNS availability; this version does not configure replication or zone transfers automatically. Do not list a second nameserver unless it really serves the same zone. In-zone nameserver A records are generated automatically; nameservers such as ns1.example.com outside the delegated zone need their A record at Cloudflare.
 
 ## 3. Install and stage the optional backends
 
@@ -73,10 +73,10 @@ After restarting UNM in live mode, use **Apply saved websites** and **Apply save
 Test DNS before delegation:
 
 ```bash
-dig @157.230.239.126 minecraft.mrhaydenn.us SOA +norecurse
-dig @157.230.239.126 trigun.minecraft.mrhaydenn.us A +norecurse
-dig @157.230.239.126 _minecraft._tcp.trigun.minecraft.mrhaydenn.us SRV +norecurse
-dig +tcp @157.230.239.126 trigun.minecraft.mrhaydenn.us A +norecurse
+dig @203.0.113.10 minecraft.example.com SOA +norecurse
+dig @203.0.113.10 game.minecraft.example.com A +norecurse
+dig @203.0.113.10 _minecraft._tcp.game.minecraft.example.com SRV +norecurse
+dig +tcp @203.0.113.10 game.minecraft.example.com A +norecurse
 ```
 
 Run these from outside the VPS too. Responses should have the authoritative `aa` flag. BIND has recursion/cache queries and zone transfers disabled, plus response rate limiting. An unrelated domain should not receive a recursive answer.
@@ -85,29 +85,29 @@ For websites, point DNS A records to the public VPS IP and remove stale AAAA rec
 
 ## 5. Cloudflare subdomain delegation
 
-After the DNS server answers correctly, create these records in the existing Cloudflare zone for mrhaydenn.us:
+After the DNS server answers correctly, create these records in the existing Cloudflare zone for example.com:
 
 | Type | Name | Content |
 |---|---|---|
-| A, DNS only | ns1 | 157.230.239.126 |
-| NS | minecraft | ns1.mrhaydenn.us |
+| A, DNS only | ns1 | 203.0.113.10 |
+| NS | minecraft | ns1.example.com |
 
-Do not change mrhaydenn.us's registrar nameservers. Only minecraft.mrhaydenn.us is delegated. Recreate existing records under minecraft on BIND before delegation and resolve conflicts with Cloudflare records at that delegation name. Existing DS records must match a DNSSEC-signed child zone; this initial backend is unsigned, so do not add a DS record. If one already exists, review it before migration.
+Do not change example.com's registrar nameservers. Only minecraft.example.com is delegated. Recreate existing records under minecraft on BIND before delegation and resolve conflicts with Cloudflare records at that delegation name. Existing DS records must match a DNSSEC-signed child zone; this initial backend is unsigned, so do not add a DS record. If one already exists, review it before migration.
 
-For Trigun, create in UNM:
+For the example server, create in UNM:
 
 | Type | Name | Content |
 |---|---|---|
-| A | trigun | 157.230.239.126 |
-| SRV | _minecraft._tcp.trigun | 0 5 20080 trigun.minecraft.mrhaydenn.us |
+| A | game | 203.0.113.10 |
+| SRV | _minecraft._tcp.game | 0 5 20080 game.minecraft.example.com |
 
-Create the matching TCP forwarding rule separately: public 20080 → the tunnel host's Java server port (often 25565). The client uses trigun.minecraft.mrhaydenn.us, and the SRV record selects the forwarded port. Records do not start a game server, allocate a port or change firewall rules. The planned external Minecraft-manager integration is not exposed yet; it will need scoped authentication and ownership controls.
+Create the matching TCP forwarding rule separately: public 20080 → the tunnel host's Java server port (often 25565). The client uses game.minecraft.example.com, and the SRV record selects the forwarded port. Records do not start a game server, allocate a port or change firewall rules. See MMSM-INTEGRATION.md for scoped integration keys and automatic DNS publishing.
 
 Verify public resolution after cached delegation expires:
 
 ```bash
-dig +trace trigun.minecraft.mrhaydenn.us
-dig _minecraft._tcp.trigun.minecraft.mrhaydenn.us SRV
+dig +trace game.minecraft.example.com
+dig _minecraft._tcp.game.minecraft.example.com SRV
 ```
 
 ## Recovery
@@ -145,12 +145,12 @@ Keep it DNS-only: the standard Cloudflare proxy does not support HTTPS port 8787
 After updating UNM, explicitly enable the public panel:
 
 ```bash
-sudo bash /opt/unm/deploy/setup-public-panel.sh
+sudo bash /opt/unm/deploy/setup-public-panel.sh unm.example.com
 ```
 
 This backs up the existing configuration, validates the generated Caddy configuration,
 preserves saved websites, enables live mode, and sets the browser origin and secure
-cookies for **https://unm.mrhaydenn.us:8787**. Caddy handles automatic production
+cookies for **https://unm.example.com:8787**. Caddy handles automatic production
 certificates and listens publicly on TCP 8787; UNM itself moves to loopback port 8786.
 The configured panel is retained whenever UNM regenerates website configuration.
 Ensure any DigitalOcean cloud firewall allows inbound TCP 8787. Ports 80 and 443
@@ -158,7 +158,7 @@ must remain reachable for Let's Encrypt validation. Login credentials stay uncha
 A previously configured browser SSH tunnel to backend port 8787 must be closed;
 use the public HTTPS address instead.
 
-In MMSM, disable automatic SSH, set UNM URL to `https://unm.mrhaydenn.us:8787`,
+In MMSM, disable automatic SSH, set UNM URL to `https://unm.example.com:8787`,
 keep the integration token, and save settings before testing the connection.
 The private SSH key field is no longer needed for this connection.
 
@@ -177,7 +177,7 @@ You only need public 80/443 for this website; the backend port can remain privat
 For direct TCP/UDP access to a service listening on the VPS public interface, add a
 firewall allowance instead of a WireGuard forwarding rule.
 
-Live mode does not automatically enable peer provisioning. In Settings, enter the
+Live mode does not automatically enable peer provisioning. On the WireGuard hosts page, enter the
 public WireGuard endpoint (IP or hostname plus its actual UDP listen port), then
 click **Enable peer provisioning**. UNM checks the existing interface against the
 panel subnet and updates only its provisioning settings. Existing peers and their

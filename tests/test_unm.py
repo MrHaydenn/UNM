@@ -204,8 +204,8 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(code,200)
         self.assertEqual(self.req('/api/websites','POST',website)[0],400)
         self.assertEqual(self.req('/api/hosts/pc','DELETE')[0],400)
-        with patch.object(self.app,'services_status',return_value=dict(zones=['minecraft.mrhaydenn.us'])):
-            body=dict(zone='minecraft.mrhaydenn.us',name='trigun',type='A',content='203.0.113.5',ttl=300,enabled=True)
+        with patch.object(self.app,'services_status',return_value=dict(zones=['minecraft.example.com'])):
+            body=dict(zone='minecraft.example.com',name='game',type='A',content='203.0.113.5',ttl=300,enabled=True)
             code,dns=self.req('/api/dns-records','POST',body)
             self.assertEqual(code,200)
             self.assertEqual(self.req('/api/dns-records','POST',body)[0],400)

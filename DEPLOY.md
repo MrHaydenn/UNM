@@ -30,7 +30,7 @@ For a public GitHub repository:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git python3 sudo curl wireguard-tools
+sudo apt-get install -y git python3 sudo curl wireguard-tools firewalld
 sudo git clone https://github.com/MrHaydenn/UNM.git /opt/unm
 sudo bash /opt/unm/deploy/install.sh
 ```
@@ -152,7 +152,11 @@ Existing hosts can instead be added with **Register an existing tunnel host**. R
 If creation is interrupted after the file is saved but before the browser receives the configuration, inspect the marked peer block and helper backup via SSH before retrying. Generated private keys cannot be recovered from UNM. Do not delete unmanaged peer blocks.
 
 
-## 4. Publish through NGINX Proxy Manager
+## 4. Publish the panel
+
+For built-in Caddy HTTPS, follow [WEBSITE-DNS.md](WEBSITE-DNS.md#public-unm-panel-with-https-on-port-8787). The public-panel script requires your chosen domain as an argument. Existing reverse proxies may instead use the following alternative.
+
+### Alternative: NGINX Proxy Manager
 
 Your NPM container cannot reach the host's loopback address. One practical option is binding the NPM-facing web listener to the host's Docker bridge gateway address. Inspect NPM's network first:
 

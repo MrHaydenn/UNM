@@ -86,7 +86,7 @@ class WireGuardHelperTests(unittest.TestCase):
         self.helper.CONFIG = Path(self.tmp.name)/'settings.json'
         self.helper.PANEL = Path(self.tmp.name)/'panel.json'
         self.helper.PANEL.write_text('{"wireguard_subnet":"10.8.0.0/24"}')
-        disabled = dict(self.cfg,enabled=False,subnet='10.7.0.0/24',server_address='10.7.0.1/24')
+        disabled = dict(self.cfg,enabled=False,subnet='10.20.0.0/24',server_address='10.20.0.1/24')
         self.helper.CONFIG.write_text(json.dumps(disabled))
         with patch.object(self.helper,'command',side_effect=self.fake_command):
             result=self.helper.execute(disabled,{'action':'configure','endpoint':'vps.example.com:51820'})

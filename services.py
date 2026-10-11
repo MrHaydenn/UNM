@@ -28,8 +28,8 @@ class Services:
         try:
             return dict(self.service_call(dict(action='status')),available=True)
         except (ValueError,OSError,subprocess.TimeoutExpired):
-            return dict(available=False,webEnabled=False,dnsEnabled=False,zones=self.cfg.get('dns_zones',['minecraft.mrhaydenn.us']),
-                        nameservers=self.cfg.get('dns_nameservers',['ns1.mrhaydenn.us']),publicIP=self.cfg.get('public_ip',''),
+            return dict(available=False,webEnabled=False,dnsEnabled=False,zones=self.cfg.get('dns_zones',['minecraft.example.com']),
+                        nameservers=self.cfg.get('dns_nameservers',['ns1.example.com']),publicIP=self.cfg.get('public_ip',''),
                         certificates=[],message='Backends not configured. Preview entries are saved only; follow the website/DNS setup guide.')
 
     def proxy_hosts(self):

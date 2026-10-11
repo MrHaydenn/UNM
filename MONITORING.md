@@ -4,15 +4,15 @@ Update using `sudo bash /opt/unm/deploy/update.sh`. Keep preview mode for the fi
 
 ## Existing WireGuard monitoring
 
-Set the root-owned `/etc/unm/wireguard.json` to match the existing VPS interface. Monitoring works with `enabled: false`; that flag controls peer changes only. For the existing PacketMover9000 setup:
+Set the root-owned `/etc/unm/wireguard.json` to match the existing VPS interface. Monitoring works with `enabled: false`; that flag controls peer changes only. For the existing example setup:
 
 ```json
 {
   "enabled": false,
   "interface": "wg0",
-  "subnet": "10.7.0.0/24",
-  "server_address": "10.7.0.1/24",
-  "endpoint": "157.230.239.126:51820"
+  "subnet": "10.8.0.0/24",
+  "server_address": "10.8.0.1/24",
+  "endpoint": "203.0.113.10:51820"
 }
 ```
 

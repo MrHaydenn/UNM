@@ -1,5 +1,8 @@
 name: Validate UNM
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_call:
 jobs:
   test:
     runs-on: ubuntu-24.04
