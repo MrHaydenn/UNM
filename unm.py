@@ -29,7 +29,7 @@ from traffic import Traffic
 from services import Services
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 LOCK = threading.RLock()
 LOG = logging.getLogger('unm')
 
@@ -278,10 +278,13 @@ class App(Networking, Traffic, Services, Integrations):
         return item
 
     def cf(self, method, path, body=None):
-        token = os.environ.get('CLOUDFLARE_API_TOKEN', '')
-        zone = self.cfg['cloudflare_zone_id']
+        settings = self.cloudflare_config()
+        if not settings['enabled']:
+            raise ValueError('Cloudflare integration is disabled')
+        token = settings['token']
+        zone = settings['zoneId']
         if not token or not re.fullmatch(r'[a-f0-9]{32}', zone):
-            raise ValueError('Configure Cloudflare zone ID and CLOUDFLARE_API_TOKEN first')
+            raise ValueError('Configure Cloudflare DNS connection under Websites / SSL first')
         req = Request('https://api.cloudflare.com/client/v4/zones/' + zone + '/dns_records' + path,
                       data=json.dumps(body).encode() if body is not None else None, method=method,
                       headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
@@ -439,6 +442,10 @@ class Handler(BaseHTTPRequestHandler):
             if len(key_parts) == 3 and self.command in ('PUT', 'DELETE'):
                 action = 'rename' if self.command == 'PUT' else 'revoke'
                 return self.send(200, app.manage_integration_key(actor, action, key_id, self.read_body() if action == 'rename' else None))
+        if path == '/api/cloudflare/settings' and self.command in ('GET','POST'):
+            return self.send(200, app.save_cloudflare_settings(self.read_body(), actor) if self.command=='POST' else app.cloudflare_website_status())
+        if path == '/api/cloudflare/test' and self.command == 'POST':
+            return self.send(200, app.test_cloudflare_settings())
         if path == '/api/update' and self.command in ('GET','POST'):
             result = subprocess.run(['sudo','-n','/usr/local/sbin/unm-update'],input=json.dumps({'action':'start' if self.command=='POST' else 'status'}),capture_output=True,text=True,timeout=15)
             if result.returncode: raise ValueError('Update helper is not installed; run the VPS update script once first')

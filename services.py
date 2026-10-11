@@ -1,6 +1,5 @@
 """Website and authoritative DNS management with preview and transactional apply."""
 import ipaddress
-import os
 from urllib.parse import urlencode
 import json
 import secrets
@@ -10,7 +9,10 @@ from networking import valid_id
 from ports import label
 
 
-class Services:
+from cloudflare_settings import CloudflareSettings
+
+
+class Services(CloudflareSettings):
     def init_services(self):
         self.db.executescript('''
         CREATE TABLE IF NOT EXISTS proxy_hosts(id TEXT PRIMARY KEY, body TEXT NOT NULL);
@@ -97,12 +99,6 @@ class Services:
         except Exception:
             self.db.rollback();self.apply_services(kind,old);raise
 
-    def cloudflare_website_status(self):
-        return dict(configured=bool(self.cfg.get('cloudflare_zone_id') and
-                    self.cfg.get('cloudflare_zone_name') and self.cfg.get('public_ip') and
-                    os.environ.get('CLOUDFLARE_API_TOKEN')),
-                    zone=self.cfg.get('cloudflare_zone_name', ''))
-
     def publish_website_dns(self, item):
         if not item.get('cloudflareDNS'):
             return item
@@ -114,8 +110,9 @@ class Services:
             try:
                 if not self.cloudflare_website_status()['configured']:
                     raise ValueError('Configure Cloudflare zone name, zone ID, public IP and API token first')
-                zone = domain(self.cfg['cloudflare_zone_name'])
-                address = str(ipaddress.IPv4Address(self.cfg['public_ip']))
+                cloudflare = self.cloudflare_config()
+                zone = domain(cloudflare['zoneName'])
+                address = str(ipaddress.IPv4Address(cloudflare['publicIP']))
                 names = item['domains']
                 if any(n != zone and not n.endswith('.'+zone) for n in names):
                     raise ValueError('Website domain is outside the configured Cloudflare zone')

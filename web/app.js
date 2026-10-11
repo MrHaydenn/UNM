@@ -162,7 +162,7 @@ function renderServices(){
   $('dns-list').innerHTML=state.dnsRecords.map(r=>'<article class="card"><div><h3>'+esc(r.name)+' '+badge(r.enabled)+'</h3><p>'+esc(r.type)+' · '+esc(r.content)+' · TTL '+r.ttl+'</p></div><div class="actions"><button data-dns-action="edit" data-id="'+esc(r.id)+'">Edit</button><button role="switch" aria-checked="'+r.enabled+'" data-dns-action="toggle" data-id="'+esc(r.id)+'">'+(r.enabled?'On':'Off')+'</button><button data-dns-action="delete" data-id="'+esc(r.id)+'">Remove</button></div></article>').join('')||empty('No custom DNS records yet. Zone SOA and nameserver records are managed automatically.');
   $('legacy-dns').innerHTML=state.forwards.filter(f=>f.dnsRecordId).map(f=>'<article class="card"><div><h3>Existing Cloudflare record</h3><p>'+esc(f.hostname)+' · associated with '+esc(f.name||f.id)+'</p></div><button data-legacy-dns="'+esc(f.id)+'">Remove DNS record</button></article>').join('');
 }
-function editWebsite(rule){const f=$('website-form');f.reset();f.elements.cloudflareDNS.checked=!rule&&!!state.cloudflare?.configured;$('website-cloudflare-help').textContent=state.cloudflare?.configured?'Creates DNS-only A records pointing to the VPS for '+state.cloudflare.zone+'. The destination port stays in the proxy configuration.':'One-time VPS setup required: see the Cloudflare website DNS guide in the README.';f.elements.id.value='';f.hidden=false;f.elements.hostId.innerHTML='<option value="@vps">This VPS · 127.0.0.1</option>'+state.hosts.map(h=>'<option value="'+esc(h.id)+'">'+esc(h.id)+' · '+esc(h.address)+'</option>').join('');if(rule)for(const [k,v] of Object.entries(rule))if(f.elements[k]){if(k==='ssl'||k==='enabled'||k==='cloudflareDNS')f.elements[k].checked=v;else f.elements[k].value=k==='domains'?v.join(', '):v;}f.scrollIntoView({behavior:'smooth',block:'center'});}
+function editWebsite(rule){const f=$('website-form');f.reset();f.elements.cloudflareDNS.checked=!rule&&!!state.cloudflare?.configured;$('website-cloudflare-help').textContent=state.cloudflare?.configured?'Creates DNS-only A records pointing to the VPS for '+state.cloudflare.zone+'. The destination port stays in the proxy configuration.':'Open Cloudflare DNS connection above to enable and configure automatic DNS publishing.';f.elements.id.value='';f.hidden=false;f.elements.hostId.innerHTML='<option value="@vps">This VPS · 127.0.0.1</option>'+state.hosts.map(h=>'<option value="'+esc(h.id)+'">'+esc(h.id)+' · '+esc(h.address)+'</option>').join('');if(rule)for(const [k,v] of Object.entries(rule))if(f.elements[k]){if(k==='ssl'||k==='enabled'||k==='cloudflareDNS')f.elements[k].checked=v;else f.elements[k].value=k==='domains'?v.join(', '):v;}f.scrollIntoView({behavior:'smooth',block:'center'});}
 $('new-website').onclick=()=>editWebsite();$('cancel-website').onclick=()=>$('website-form').hidden=true;
 $('website-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{const f=e.target;const body=Object.fromEntries(new FormData(f));body.domains=body.domains.split(/[\s,]+/).filter(Boolean);body.port=Number(body.port);body.cloudflareDNS=f.elements.cloudflareDNS.checked;body.ssl=f.elements.ssl.checked;body.enabled=f.elements.enabled.checked;const saved=await request('/api/websites','POST',body);f.hidden=true;await refresh();if(saved.cloudflareStatus)notice(saved.cloudflareStatus);});};
 $('website-list').onclick=e=>attempt(async()=>{const button=e.target.closest('[data-website-action]');if(!button)return;const r=state.websites.find(r=>r.id===button.dataset.id);if(button.dataset.websiteAction==='edit')return editWebsite(r);if(button.dataset.websiteAction==='toggle')await request('/api/websites','POST',{...r,enabled:!r.enabled});else{if(!confirm('Remove website '+r.name+'?'))return;await request('/api/websites/'+encodeURIComponent(r.id),'DELETE');}await refresh();});
@@ -194,3 +194,29 @@ $('run-update').onclick=()=>attempt(async()=>{if(!confirm('Update UNM from the l
 $('provisioning-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{await request('/api/wireguard/provisioning','POST',Object.fromEntries(new FormData(e.target)));await refresh();notice('WireGuard peer provisioning enabled. Existing tunnels remain in place.');});};
 document.querySelector('[data-tab="hosts"]').addEventListener('click',()=>{const f=$('provisioning-form');f.elements.endpoint.value=state.wireguard.available?state.wireguard.endpoint:state.services.publicIP?state.services.publicIP+':51820':'';});
 document.querySelector('[data-tab="settings"]').addEventListener('click',()=>attempt(updateStatus));
+
+$('cloudflare-setup').addEventListener('toggle',()=>{
+  if (!$('cloudflare-setup').open || !state) return;
+  const f=$('cloudflare-form'),c=state.cloudflare;
+  f.elements.enabled.checked=c.enabled;
+  f.elements.zoneName.value=c.zone||'';
+  f.elements.zoneId.value=c.zoneId||'';
+  f.elements.publicIP.value=c.publicIP||'';
+  f.elements.token.value='';
+  $('cloudflare-token-status').textContent=c.tokenSaved?'Token saved. Leave the token field blank to keep it.':'No token saved.';
+});
+$('cloudflare-form').onsubmit=e=>{e.preventDefault();attempt(async()=>{
+  const f=e.target,button=f.querySelector('button');button.disabled=true;$('cloudflare-result').textContent='Saving…';
+  try{
+    const body=Object.fromEntries(new FormData(f));body.enabled=f.elements.enabled.checked;
+    const result=await request('/api/cloudflare/settings','POST',body);
+    f.elements.token.value='';state.cloudflare=result;
+    $('cloudflare-token-status').textContent=result.tokenSaved?'Token saved. Leave blank to keep it.':'No token saved.';
+    $('cloudflare-result').textContent='Settings saved. They apply immediately; no restart needed.';
+  }catch(error){$('cloudflare-result').textContent='Settings were not saved.';throw error;}finally{button.disabled=false;}
+});};
+$('cloudflare-test').onclick=()=>attempt(async()=>{
+  const button=$('cloudflare-test');button.disabled=true;$('cloudflare-result').textContent='Testing saved connection…';
+  try{const result=await request('/api/cloudflare/test','POST',{});$('cloudflare-result').textContent=result.message;}
+  catch(error){$('cloudflare-result').textContent='Connection test failed.';throw error;}finally{button.disabled=false;}
+});

@@ -111,6 +111,39 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.req(route)[1], [])
         self.assertIsNotNone(self.app.db.execute('SELECT body FROM dns_publications WHERE client=?', (key_id,)).fetchone())
 
+    def test_cloudflare_gui_credentials_auth_csrf_and_persistence(self):
+        body=dict(enabled=True,zoneId='a'*32,zoneName='example.com',
+                  publicIP='203.0.113.10',token='test_cloudflare_secret_123456')
+        self.assertEqual(self.req('/api/cloudflare/settings')[0],403)
+        self.login()
+        self.assertEqual(self.req('/api/cloudflare/settings','POST',body,csrf=False)[0],403)
+        code,result=self.req('/api/cloudflare/settings','POST',body)
+        self.assertEqual(code,200)
+        self.assertTrue(result['configured']);self.assertTrue(result['tokenSaved'])
+        self.assertNotIn(body['token'],json.dumps(result))
+        self.assertNotIn(body['token'],json.dumps(self.req('/api/state')[1]))
+        self.assertEqual(self.req('/api/cloudflare/settings','POST',dict(body,token=''))[0],200)
+        self.assertEqual(self.app.cloudflare_config()['token'],body['token'])
+        self.assertEqual(self.req('/api/cloudflare/settings','POST',dict(body,zoneId='bad'))[0],400)
+        self.assertEqual(self.app.cloudflare_config()['zoneId'],body['zoneId'])
+        with patch.object(self.app,'cf',return_value=[]) as api:
+            self.assertEqual(self.req('/api/cloudflare/test','POST',{})[0],200)
+            api.assert_called_once_with('GET','?per_page=1')
+        import io
+        with patch('unm.urlopen') as network:
+            network.return_value.__enter__.return_value=io.StringIO('{"success":true,"result":[]}')
+            self.app.cf('GET','?per_page=1')
+            request=network.call_args[0][0]
+            self.assertIn('/zones/'+body['zoneId']+'/dns_records',request.full_url)
+            self.assertEqual(request.get_header('Authorization'),'Bearer '+body['token'])
+        self.assertEqual(self.req('/api/cloudflare/settings','POST',dict(body,enabled=False,token=''))[0],200)
+        self.assertFalse(self.app.cloudflare_website_status()['configured'])
+        with self.assertRaises(ValueError): self.app.cf('GET','')
+        path=Path(self.tmp.name)/'cloudflare.json'
+        self.assertEqual(json.loads(path.read_text())['token'],body['token'])
+        if sys.platform!='win32': self.assertEqual(path.stat().st_mode & 0o777,0o600)
+        self.assertNotIn(body['token'],str(self.app.db.execute('SELECT * FROM audit').fetchall()))
+
     def test_vps_website_destination_and_management_csrf(self):
         self.login()
         body=dict(name='VPS service',hostId='@vps',domains=['local.example.com'],port=8685,scheme='http',ssl=True,enabled=True)

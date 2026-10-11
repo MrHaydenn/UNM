@@ -20,7 +20,7 @@ A focused web panel for an Ubuntu VPS: WireGuard hosts, TCP/UDP port forwarding,
 
 ## Install on Ubuntu 24.04 LTS
 
-UNM 0.2.1 runs as a systemd service. Start in preview mode, then enable live operations after configuring your network. No default admin password or personal domain/IP is included. Examples use `example.com`, `203.0.113.10` and `10.8.0.0/24`; replace these with your own values.
+UNM 0.2.2 runs as a systemd service. Start in preview mode, then enable live operations after configuring your network. No default admin password or personal domain/IP is included. Examples use `example.com`, `203.0.113.10` and `10.8.0.0/24`; replace these with your own values.
 
 ### 1. Install and create an account
 
@@ -81,7 +81,7 @@ Website destinations can be WireGuard hosts or **This VPS**. DNS hosting is opti
 
 ## Automatic Cloudflare website DNS
 
-Configure a scoped Cloudflare token, Zone ID, root domain and public VPS IP once, then website creation can automatically publish the required A records. See [Cloudflare website DNS setup](CLOUDFLARE-WEBSITES.md). Existing DNS records are protected from replacement.
+Under **Websites / SSL → Cloudflare DNS connection**, enter a scoped API token, Zone ID, root domain and public VPS IP once, then website creation can automatically publish the required A records. See [Cloudflare website DNS setup](CLOUDFLARE-WEBSITES.md). Existing DNS records are protected from replacement.
 
 ## Updates
 
