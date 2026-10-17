@@ -20,7 +20,7 @@ A focused web panel for an Ubuntu VPS: WireGuard hosts, TCP/UDP port forwarding,
 
 ## Install on Ubuntu 24.04 LTS
 
-UNM 0.2.2 runs as a systemd service. Start in preview mode, then enable live operations after configuring your network. No default admin password or personal domain/IP is included. Examples use `example.com`, `203.0.113.10` and `10.8.0.0/24`; replace these with your own values.
+UNM 0.2.3 runs as a systemd service. Start in preview mode, then enable live operations after configuring your network. No default admin password or personal domain/IP is included. Examples use `example.com`, `203.0.113.10` and `10.8.0.0/24`; replace these with your own values.
 
 ### 1. Install and create an account
 

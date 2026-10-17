@@ -1,0 +1,15 @@
+[Unit]
+Description=UNM stalled certificate download recovery
+After=unm-caddy.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/unm-cert-recovery
+Environment=XDG_DATA_HOME=/var/lib/caddy/data
+Environment=XDG_CONFIG_HOME=/var/lib/caddy/config
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/unm-services
+TimeoutStartSec=100

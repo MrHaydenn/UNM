@@ -82,5 +82,9 @@ printf 'unm ALL=(root) NOPASSWD: /usr/local/sbin/unm-firewall "", /usr/local/sbi
 chmod 440 /etc/sudoers.d/unm
 visudo -cf /etc/sudoers.d/unm
 install -m 644 /opt/unm/deploy/unm.service /etc/systemd/system/unm.service
+install -m 755 -o root -g root /opt/unm/deploy/unm-cert-recovery /usr/local/sbin/unm-cert-recovery
+install -m 644 -o root -g root /opt/unm/deploy/unm-cert-recovery.service /etc/systemd/system/unm-cert-recovery.service
+install -m 644 -o root -g root /opt/unm/deploy/unm-cert-recovery.timer /etc/systemd/system/unm-cert-recovery.timer
 systemctl daemon-reload
+systemctl enable --now unm-cert-recovery.timer
 echo 'Installed. Existing configuration was preserved. For a new install, edit /etc/unm/config.json, create your admin, then start unm.'

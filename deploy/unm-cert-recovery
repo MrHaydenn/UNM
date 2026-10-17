@@ -1,0 +1,67 @@
+#!/usr/bin/python3 -I
+"""Recover terminal ACME certificate-download failures with bounded graceful reloads."""
+import json
+import subprocess
+import time
+from pathlib import Path
+
+STATE = Path('/var/lib/unm-services/cert-recovery.json')
+
+
+def failed_download(events, handled, now):
+    failures = {}
+    for event in events:
+        try:
+            message = json.loads(event.get('MESSAGE', ''))
+        except (ValueError, TypeError):
+            continue
+        stamp = float(message.get('ts', 0))
+        error = message.get('error', '')
+        if message.get('logger') == 'tls' and message.get('msg') == 'job failed' and 'downloading certificate chain' in error and 'Certificate not found' in error and '404' in error:
+            failures[stamp] = error.split(':', 1)[0]
+        if message.get('msg') == 'certificate obtained successfully':
+            name = message.get('identifier')
+            failures = {t: d for t, d in failures.items() if d != name}
+    eligible = [t for t in failures if handled < t <= now - 120]
+    return max(eligible, default=0)
+
+
+def retry_allowed(attempts, now):
+    return len(attempts) < 3 and (not attempts or now - attempts[-1] >= 900)
+
+
+def run(args):
+    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=40).stdout
+
+
+def main():
+    import fcntl
+    with Path('/var/lib/unm-services/lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        cfg = json.loads(Path('/etc/unm/services.json').read_text())
+        if cfg.get('web_enabled') is not True:
+            return
+        if subprocess.run(['/usr/bin/systemctl', 'is-active', '--quiet', 'unm-caddy'], timeout=5).returncode:
+            return
+        state = json.loads(STATE.read_text()) if STATE.exists() else {}
+        now = time.time()
+        attempts = [t for t in state.get('attempts', []) if now - t < 86400]
+        if not retry_allowed(attempts, now):
+            return
+        logs = run(['/usr/bin/journalctl', '-u', 'unm-caddy', '--since', '24 hours ago', '-n', '3000', '-o', 'json', '--no-pager'])
+        events = [json.loads(line) for line in logs.splitlines() if line.strip()]
+        event = failed_download(events, state.get('handled', 0), now)
+        if not event:
+            return
+        # Persist before attempting recovery, so a failed command cannot cause a retry loop.
+        attempts.append(now)
+        temp = STATE.with_suffix('.tmp')
+        temp.write_text(json.dumps(dict(handled=event, attempts=attempts)))
+        temp.chmod(0o600)
+        temp.replace(STATE)
+        run(['/usr/bin/caddy', 'reload', '--config', '/etc/caddy/unm/Caddyfile', '--adapter', 'caddyfile', '--address', 'unix//run/unm-caddy/admin.sock', '--force'])
+        print('UNM: Retried stalled certificate download with a graceful Caddy reload (maximum 3 per day).')
+
+
+if __name__ == '__main__':
+    main()

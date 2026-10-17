@@ -184,3 +184,7 @@ panel subnet and updates only its provisioning settings. Existing peers and thei
 configuration are preserved. SaveConfig=true must first be changed to false in the
 WireGuard interface configuration. Keep its UDP listen port allowed through both
 firewalld and any DigitalOcean cloud firewall.
+
+### Automatic certificate download recovery
+
+UNM installs a two-minute background check for terminal Caddy certificate-chain download failures reporting HTTP 404 / Certificate not found. It waits at least two minutes, skips a failure followed by successful issuance, and forces a graceful reload to restart certificate automation. It does not restart Caddy, delete certificates, or react to ordinary DNS/validation errors. Recovery is limited to once per 15 minutes and three attempts per rolling 24 hours. Persistent failures still require checking Caddy logs and the installed Caddy version. Install/update enables `unm-cert-recovery.timer` automatically; actions are logged under `unm-cert-recovery.service`.
